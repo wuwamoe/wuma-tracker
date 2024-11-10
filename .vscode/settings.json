@@ -1,0 +1,4 @@
+{
+  "svelte.enable-ts-plugin": true,
+  "files.autoSave": "off"
+}
