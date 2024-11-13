@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "명조 맵스 트래커",
+  "productName": "wuwa-tracker",
   "mainBinaryName": "wuma-tracker",
   "version": "0.0.2",
   "identifier": "com.wumadevs.wumatracker",
@@ -26,7 +26,7 @@
   "bundle": {
     "createUpdaterArtifacts": true,
     "active": true,
-    "targets": "nsis",
+    "targets": "all",
     "category": "Utility",
     "icon": [
       "icons/32x32.png",
@@ -36,6 +36,9 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "wix": {
+        "language": "ko-KO"
+      },
       "nsis": {
         "languages": ["Korean", "English"],
         "displayLanguageSelector": true,
