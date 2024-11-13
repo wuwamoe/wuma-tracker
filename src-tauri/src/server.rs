@@ -8,6 +8,7 @@ use axum::{
     Router,
 };
 use futures::{sink::SinkExt, stream::StreamExt};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -33,9 +34,10 @@ pub async fn tokio_init(app_handle: AppHandle) {
     let client_count = Mutex::new(0);
     let ticker_handle: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
+    let app = app_handle.clone();
     let app_state = Arc::new(AxumState {
         client_count,
-        app_handle,
+        app_handle: app,
         tx,
         ticker_handle,
     });
@@ -44,9 +46,16 @@ pub async fn tokio_init(app_handle: AppHandle) {
         .route("/", get(websocket_handler))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:46821")
-        .await
-        .unwrap();
+    let Ok(listener) = tokio::net::TcpListener::bind("127.0.0.1:46821").await else {
+        let app = app_handle.clone();
+        let _ = app.dialog()
+            .message("통신 서버 시작 실패. 트레이에 프로그램이 이미 실행 중인 지 확인해주세요.")
+            .kind(MessageDialogKind::Error)
+            .title("오류")
+            .blocking_show();
+        std::process::exit(0);
+    };
+
     log::info!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
 }
