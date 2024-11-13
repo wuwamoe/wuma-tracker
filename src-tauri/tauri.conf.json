@@ -37,7 +37,8 @@
     ],
     "windows": {
       "wix": {
-        "language": "ko-KR"
+        "language": "ko-KR",
+        "template": "./windows/fragments/main.wxs"
       },
       "nsis": {
         "languages": ["Korean", "English"],
