@@ -45,6 +45,7 @@ async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, S
 #[tokio::main]
 pub async fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_handle = app.handle().clone();

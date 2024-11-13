@@ -13,9 +13,9 @@
     "windows": [
       {
         "label": "main",
-        "title": "명조 맵스 도구",
-        "width": 800,
-        "height": 600
+        "title": "명조 맵스 트래커",
+        "width": 600,
+        "height": 400
       }
     ],
     "security": {
@@ -23,6 +23,7 @@
     }
   },
   "bundle": {
+    "createUpdaterArtifacts": true,
     "active": true,
     "targets": "all",
     "icon": [
@@ -32,5 +33,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZEQjU1NTVCNjAxRjlCQUQKUldTdG14OWdXMVcxYldPMkoweFg3bGJzRElCNnVWZUdxSldJWks0cTcwakpjY2tqTkErTytYK20K",
+      "endpoints": [
+        "https://github.com/wuwamoe/wuma-tracker/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

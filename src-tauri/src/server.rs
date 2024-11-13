@@ -64,10 +64,10 @@ async fn websocket_handler(
 // receiving / sending chat messages).
 async fn websocket(stream: WebSocket, state: Arc<AxumState>) {
     // By splitting, we can send and receive at the same time.
-    let (mut sender, _) = stream.split();
+    let (mut sender, mut receiver) = stream.split();
 
     let send_state = state.clone();
-    let send_task = tokio::spawn(async move {
+    let mut send_task = tokio::spawn(async move {
         let mut rx = send_state.tx.subscribe();
         let handle = send_state.app_handle.clone();
         while let Ok(msg) = rx.recv().await {
@@ -77,6 +77,11 @@ async fn websocket(stream: WebSocket, state: Arc<AxumState>) {
             if sender.send(Message::Text(json)).await.is_err() {
                 break;
             }
+        }
+    });
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(Message::Close(_))) = receiver.next().await {
+            break;
         }
     });
 
@@ -102,7 +107,10 @@ async fn websocket(stream: WebSocket, state: Arc<AxumState>) {
         }))
     }
 
-    let _ = send_task.await;
+    tokio::select! {
+        _ = &mut send_task => recv_task.abort(),
+        _ = &mut recv_task => send_task.abort(),
+    };
 
     let count = get_and_incr(&state.client_count, -1);
     if count == 1 {
@@ -111,7 +119,7 @@ async fn websocket(stream: WebSocket, state: Arc<AxumState>) {
             Some(ref t) => {
                 t.abort();
                 *ticker = None
-            },
+            }
             None => {
                 println!("Ticker destruction failed: JoinHandle is None")
             }

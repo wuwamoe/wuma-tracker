@@ -6,5 +6,5 @@ pub struct WuwaOffset {
     pub aplayercontroller_acknowlegedpawn: u64,
     pub aactor_rootcomponent: u64,
     pub uscenecomponent_relativelocation: u64,
-    pub uscenecomponent_relativerotation: u64
+    pub uscenecomponent_relativerotation: u64,
 }
