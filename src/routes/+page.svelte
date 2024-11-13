@@ -2,10 +2,16 @@
     import { invoke } from "@tauri-apps/api/core";
     import { Button } from "@/components/ui/button";
     import { listen } from "@tauri-apps/api/event";
-    import type PlayerInfo from "src/lib/types/PlayerInfo";
+    import type PlayerInfo from "$lib/types/PlayerInfo";
+    import { checkUpdates } from "$lib/utils";
+    import { exit } from "@tauri-apps/plugin-process";
 
     let procState = $state(0);
     let pLocation = $state<PlayerInfo>();
+
+    $effect(() => {
+        checkUpdates();
+    });
 
     async function attach(event: Event) {
         event.preventDefault();
@@ -17,21 +23,17 @@
                 procState = 0;
             });
     }
-    async function getLocation(event: Event) {
-        event.preventDefault();
-        const res = await invoke<PlayerInfo>("get_location");
-        console.log(res);
-        pLocation = res;
+    async function quit() {
+        await exit(0);
     }
 
     listen<PlayerInfo>("handle-location-change", (e) => {
-        console.log(`data tx:${e.payload}`);
         pLocation = e.payload;
     });
 </script>
 
 <main class="flex flex-col py-2 px-4">
-    <h1 class="text-2xl mb-2 font-bold">명조 맵스 서포터</h1>
+    <h1 class="text-2xl mb-2 font-bold">명조 맵스 트래커</h1>
     <div class="text-lg">
         상태: {procState == 0 ? "🔴 게임 연결되지 않음" : "🟢 게임 연결됨"}
     </div>
@@ -44,5 +46,6 @@
 
     <div class="flex flex-row space-x-2 mt-4">
         <Button onclick={attach}>연결</Button>
+        <Button onclick={quit} variant="destructive">프로그램 종료</Button>
     </div>
 </main>
