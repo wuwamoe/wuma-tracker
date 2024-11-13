@@ -1,8 +1,8 @@
 [package]
 name = "wuma-tracker"
-version = "0.0.1"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.0.2"
+description = "명조 맵스 트래커"
+authors = ["wumadevs"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -28,6 +28,8 @@ axum = { version = "0.7.7", features = ["ws"] }
 tracing = "0.1.40"
 futures = "0.3.31"
 tauri-plugin-process = "2"
+tauri-plugin-log = "2"
+log = "0.4.22"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

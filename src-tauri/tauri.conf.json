@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "wuma-tracker",
-  "version": "0.0.1",
+  "mainBinaryName": "명조 맵스 트래커",
+  "version": "0.0.2",
   "identifier": "com.wumadevs.wumatracker",
   "build": {
     "beforeDevCommand": "pnpm dev",

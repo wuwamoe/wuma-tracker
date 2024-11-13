@@ -47,7 +47,7 @@ pub async fn tokio_init(app_handle: AppHandle) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:46821")
         .await
         .unwrap();
-    println!("listening on {}", listener.local_addr().unwrap());
+    log::info!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -55,7 +55,7 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AxumState>>,
 ) -> impl IntoResponse {
-    println!("client connected");
+    log::info!("client connected");
     ws.on_upgrade(|socket| websocket(socket, state))
 }
 
@@ -121,12 +121,12 @@ async fn websocket(stream: WebSocket, state: Arc<AxumState>) {
                 *ticker = None
             }
             None => {
-                println!("Ticker destruction failed: JoinHandle is None")
+                log::error!("Ticker destruction failed: JoinHandle is None")
             }
         }
     }
 
-    println!("client disconnected: {}", count)
+    log::info!("client disconnected: {}", count)
 }
 
 fn get_and_incr(mutex: &Mutex<i32>, incr: i32) -> i32 {

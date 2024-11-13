@@ -3,11 +3,13 @@ mod offsets;
 mod server;
 mod types;
 
+use std::any::Any;
+
 use external::WinProc;
 use server::tokio_init;
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
 use tokio::sync::Mutex;
@@ -45,6 +47,7 @@ async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, S
 #[tokio::main]
 pub async fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
@@ -72,7 +75,21 @@ pub async fn run() {
                     }
                 })
                 .menu(&menu)
-                .menu_on_left_click(true)
+                .menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } => {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
                 .build(app)?;
 
             if let Some(window) = app.get_webview_window("main") {

@@ -65,7 +65,7 @@ impl WinProc {
             let target = last_addr + t.1;
             let Some(ret) = self.read_memory::<u64>(target) else {
                 let msg = format!("Pointer value retrieval failure({}): {:X}", t.0, target);
-                println!("{}", msg);
+                log::error!("{}", msg);
                 return Err(msg);
             };
             last_addr = ret;
@@ -77,7 +77,7 @@ impl WinProc {
                 "Value retreival failure({}): {:X}",
                 "RelativeLocation, RelativeRotation", target
             );
-            println!("{}", msg);
+            log::error!("{}", msg);
             return Err(msg);
         };
 
@@ -102,7 +102,7 @@ impl WinProc {
                     is_init = false;
                 }
                 self.base_addr = h_mod as u64;
-                println!("base address is {:X}", self.base_addr);
+                log::info!("connected! base address is {:X}", self.base_addr);
             }
             self.is_init = is_init;
             return is_init;
@@ -181,7 +181,6 @@ impl Drop for WinProc {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
-                println!("Destructed!");
                 CloseHandle(self.handle);
             }
         }
