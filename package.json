@@ -1,6 +1,6 @@
 {
-  "name": "wuma-helper",
-  "version": "0.1.0",
+  "name": "wuma-tracker",
+  "version": "0.0.1",
   "description": "",
   "type": "module",
   "scripts": {

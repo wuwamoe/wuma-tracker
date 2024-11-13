@@ -33,7 +33,7 @@ fn main() {
         return;
     }
 
-    wuma_helper_lib::run()
+    wuma_tracker_lib::run()
 }
 
 fn is_elevated() -> bool {
