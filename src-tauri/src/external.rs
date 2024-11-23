@@ -65,7 +65,7 @@ impl WinProc {
             let target = last_addr + t.1;
             let Some(ret) = self.read_memory::<u64>(target) else {
                 let msg = format!("Pointer value retrieval failure({}): {:X}", t.0, target);
-                log::error!("{}", msg);
+                // log::error!("{}", msg);
                 return Err(msg);
             };
             last_addr = ret;
