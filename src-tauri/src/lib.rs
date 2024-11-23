@@ -48,7 +48,7 @@ async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, S
 pub async fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(tauri_plugin_log::Builder::new().max_file_size(5242880).build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
