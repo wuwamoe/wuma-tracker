@@ -1,6 +1,6 @@
 [package]
 name = "wuma-tracker"
-version = "0.0.5"
+version = "0.0.6"
 description = "명조 맵스 트래커"
 authors = ["wumadevs"]
 edition = "2021"
