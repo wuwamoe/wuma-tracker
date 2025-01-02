@@ -20,7 +20,7 @@ use winapi::{
     },
 };
 
-use crate::{offsets::WuwaOffset, types::PlayerInfo};
+use crate::{offsets::WuwaOffset, types::{FIntVector, PlayerInfo}};
 
 pub struct WinProc {
     pid: u32,
@@ -32,13 +32,15 @@ pub struct WinProc {
 impl WinProc {
     const OFFSET: WuwaOffset = WuwaOffset {
         global_gworld: 0x84371F0,
+        uworld_persistentlevel: 0x38,
         uworld_owninggameinstance: 0x1B0,
+        ulevel_lastworldorigin: 0xC8,
         ugameinstance_localplayers: 0x40,
         uplayer_playercontroller: 0x38,
         aplayercontroller_acknowlegedpawn: 0x340,
         aactor_rootcomponent: 0x1A0,
         uscenecomponent_relativelocation: 0x13C,
-        uscenecomponent_relativerotation: 0x148,
+        // uscenecomponent_relativerotation: 0x148,
     };
 
     pub fn get_location(&self) -> Result<PlayerInfo, String> {
@@ -80,8 +82,42 @@ impl WinProc {
             log::error!("{}", msg);
             return Err(msg);
         };
+        
+        let target_worldorigin = [
+            ("GWorld", Self::OFFSET.global_gworld),
+            ("PersistentLevel", Self::OFFSET.uworld_persistentlevel)
+        ];
 
-        Ok(location)
+        last_addr = self.base_addr;
+        for t in target_worldorigin {
+            let target = last_addr + t.1;
+            let Some(ret) = self.read_memory::<u64>(target) else {
+                let msg = format!("Pointer value retrieval failure({}): {:X}", t.0, target);
+                // log::error!("{}", msg);
+                return Err(msg);
+            };
+            last_addr = ret;
+        }
+        
+        let target = last_addr + Self::OFFSET.ulevel_lastworldorigin;
+        let Some(root_location) = self.read_memory::<FIntVector>(target) else {
+            let msg = format!(
+                "Value retreival failure({}): {:X}",
+                "LastWorldOrigin", target
+            );
+            log::error!("{}", msg);
+            return Err(msg);
+        };
+        
+        let real_location = PlayerInfo {
+            x: location.x + (root_location.x as f32),
+            y: location.y + (root_location.y as f32),
+            z: location.z + (root_location.z as f32),
+            pitch: location.pitch,
+            yaw: location.yaw,
+            roll: location.roll
+        };
+        Ok(real_location)
     }
 
     pub fn init(&mut self) -> bool {
