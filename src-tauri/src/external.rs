@@ -31,7 +31,7 @@ pub struct WinProc {
 
 impl WinProc {
     const OFFSET: WuwaOffset = WuwaOffset {
-        global_gworld: 0x8506520,
+        global_gworld: 0x84371F0,
         uworld_owninggameinstance: 0x1B0,
         ugameinstance_localplayers: 0x40,
         uplayer_playercontroller: 0x38,
