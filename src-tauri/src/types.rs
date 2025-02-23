@@ -33,3 +33,18 @@ pub struct FIntVector {
     pub y: i32,
     pub z: i32,
 }
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocalStorageConfig {
+    pub ip: Option<String>,
+    pub port: Option<u16>
+}
+
+impl Default for LocalStorageConfig {
+    fn default() -> LocalStorageConfig {
+        LocalStorageConfig {
+            ip: None,
+            port: None
+        }
+    }
+}

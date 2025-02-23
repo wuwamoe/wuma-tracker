@@ -2,18 +2,23 @@ mod external;
 mod offsets;
 mod server;
 mod types;
+mod util;
+use std::sync::Arc;
+
 use external::WinProc;
-use server::tokio_init;
+use server::ServerManager;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
 use tokio::sync::Mutex;
-use types::PlayerInfo;
+use types::{LocalStorageConfig, PlayerInfo};
+use util::{get_config, write_config};
 
 struct AppState {
     proc: Mutex<Option<WinProc>>,
+    server_manager: Arc<Mutex<ServerManager>>,
 }
 
 #[tauri::command]
@@ -32,7 +37,7 @@ async fn find_and_attach(state: tauri::State<'_, AppState>) -> Result<(), String
 // remember to call `.manage(MyState::default())`
 #[tauri::command]
 async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, String> {
-    let state = state.clone();
+    // let state = state.clone();
     let proc_lock = state.proc.lock().await;
     let Some(ref proc) = *proc_lock else {
         return Err(String::from("Process not initialized"));
@@ -44,8 +49,17 @@ async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, S
 #[tokio::main]
 pub async fn run() {
     tauri::Builder::default()
+        .manage(AppState {
+            proc: Mutex::new(None),
+            server_manager: Arc::new(Mutex::new(ServerManager::default())),
+        })
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).max_file_size(5242880).build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .max_file_size(5242880)
+                .build(),
+        )
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
@@ -99,14 +113,31 @@ pub async fn run() {
                     }
                 });
             }
-            // Actix 서버를 setup 단계에서 비동기적으로 시작
+
+            
+            let handle = app.handle().clone();
             tokio::spawn(async move {
-                tokio_init(app_handle).await;
+                // write_config(app_handle.clone(), LocalStorageConfig::default()).await.unwrap();
+                // Get config
+                let config = get_config(app_handle.clone()).await.unwrap_or_default();
+                handle
+                    .state::<AppState>()
+                    .server_manager
+                    .lock()
+                    .await
+                    .start(
+                        app_handle,
+                        config.ip.unwrap_or(String::from("0.0.0.0")),
+                        config.port.unwrap_or(46821),
+                    )
+                    .await;
             });
+
+            // Actix 서버를 setup 단계에서 비동기적으로 시작
+            // tokio::spawn(async move {
+            //     tokio_init(app_handle).await;
+            // });
             Ok(())
-        })
-        .manage(AppState {
-            proc: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![find_and_attach, get_location])
         .run(tauri::generate_context!())
