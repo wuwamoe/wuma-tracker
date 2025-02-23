@@ -20,7 +20,10 @@ use winapi::{
     },
 };
 
-use crate::{offsets::WuwaOffset, types::{FIntVector, PlayerInfo}};
+use crate::{
+    offsets::WuwaOffset,
+    types::{FIntVector, PlayerInfo},
+};
 
 pub struct WinProc {
     pid: u32,
@@ -82,10 +85,10 @@ impl WinProc {
             log::error!("{}", msg);
             return Err(msg);
         };
-        
+
         let target_worldorigin = [
             ("GWorld", Self::OFFSET.global_gworld),
-            ("PersistentLevel", Self::OFFSET.uworld_persistentlevel)
+            ("PersistentLevel", Self::OFFSET.uworld_persistentlevel),
         ];
 
         last_addr = self.base_addr;
@@ -98,7 +101,7 @@ impl WinProc {
             };
             last_addr = ret;
         }
-        
+
         let target = last_addr + Self::OFFSET.ulevel_lastworldorigin;
         let Some(root_location) = self.read_memory::<FIntVector>(target) else {
             let msg = format!(
@@ -108,14 +111,14 @@ impl WinProc {
             log::error!("{}", msg);
             return Err(msg);
         };
-        
+
         let real_location = PlayerInfo {
             x: location.x + (root_location.x as f32),
             y: location.y + (root_location.y as f32),
             z: location.z + (root_location.z as f32),
             pitch: location.pitch,
             yaw: location.yaw,
-            roll: location.roll
+            roll: location.roll,
         };
         Ok(real_location)
     }

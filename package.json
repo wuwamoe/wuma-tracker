@@ -29,6 +29,7 @@
     "@tailwindcss/typography": "^0.5.15",
     "@tauri-apps/cli": "^2.1.0",
     "autoprefixer": "^10.4.20",
+    "bits-ui": "^1.3.2",
     "clsx": "^2.1.1",
     "postcss": "^8.4.49",
     "prettier-plugin-svelte": "^3.3.2",

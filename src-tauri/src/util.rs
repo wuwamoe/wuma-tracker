@@ -30,6 +30,8 @@ async fn get_config_file(app_handle: AppHandle) -> Result<PathBuf> {
         .path()
         .app_config_dir()
         .context("Failed to retrieve config directory path")?;
-    create_dir_all(&res).await.context("Failed to create config base directory")?;
+    create_dir_all(&res)
+        .await
+        .context("Failed to create config base directory")?;
     Ok(res.join("config.json"))
 }

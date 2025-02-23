@@ -25,7 +25,6 @@ pub struct PlayerInfo {
     pub roll: f32,
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, serde::Serialize)]
 pub struct FIntVector {
@@ -37,14 +36,14 @@ pub struct FIntVector {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalStorageConfig {
     pub ip: Option<String>,
-    pub port: Option<u16>
+    pub port: Option<u16>,
 }
 
 impl Default for LocalStorageConfig {
     fn default() -> LocalStorageConfig {
         LocalStorageConfig {
             ip: None,
-            port: None
+            port: None,
         }
     }
 }

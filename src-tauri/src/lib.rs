@@ -13,8 +13,8 @@ use tauri::{
     Manager, WindowEvent,
 };
 use tokio::sync::Mutex;
-use types::{LocalStorageConfig, PlayerInfo};
-use util::{get_config, write_config};
+use types::PlayerInfo;
+use util::get_config;
 
 struct AppState {
     proc: Mutex<Option<WinProc>>,
@@ -48,7 +48,16 @@ async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, S
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let _ = app.get_webview_window("main")
+                       .expect("no main window")
+                       .set_focus();
+        }));
+    }
+    builder
         .manage(AppState {
             proc: Mutex::new(None),
             server_manager: Arc::new(Mutex::new(ServerManager::default())),
@@ -114,7 +123,6 @@ pub async fn run() {
                 });
             }
 
-            
             let handle = app.handle().clone();
             tokio::spawn(async move {
                 // write_config(app_handle.clone(), LocalStorageConfig::default()).await.unwrap();

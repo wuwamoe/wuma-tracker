@@ -30,7 +30,7 @@ impl ServerManager {
     pub fn default() -> ServerManager {
         ServerManager {
             shutdown_tx: Option::None,
-            handle: Option::None
+            handle: Option::None,
         }
     }
 
@@ -65,7 +65,7 @@ impl ServerManager {
                         })
                         .await
                         .unwrap();
-                },
+                }
                 Err(_) => {
                     let app = app_handle.clone();
                     let _ = app
