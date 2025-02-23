@@ -58,20 +58,22 @@ impl ServerManager {
 
             match tokio::net::TcpListener::bind(&format!("{}:{}", ip, port)).await {
                 Ok(listener) => {
-                    log::info!("listening on {}", listener.local_addr().unwrap());
+                    let addr = listener.local_addr().unwrap();
+                    log::info!("listening on {}", addr);
                     axum::serve(listener, app)
                         .with_graceful_shutdown(async {
                             shutdown_rx.await.ok();
                         })
                         .await
                         .unwrap();
+                    log::info!("gracefully shutting down: {}", addr);
                 }
                 Err(_) => {
                     let app = app_handle.clone();
                     let _ = app
                         .dialog()
                         .message(
-                            "통신 서버 시작 실패. 트레이에 프로그램이 이미 실행 중인 지 확인해주세요.",
+                            "통신 서버 시작 실패. IP 주소를 잘못 설정하였거나, 포트가 이미 사용 중인지 확인해주세요.",
                         )
                         .kind(MessageDialogKind::Error)
                         .title("오류")

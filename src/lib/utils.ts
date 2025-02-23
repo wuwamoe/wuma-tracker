@@ -21,7 +21,7 @@ export async function checkUpdates() {
             success: "업데이트 성공! 5초 후에 재시작됩니다.",
             error: "업데이트 실패. 다시 시도해주세요.",
         });
-				await delay(5000);
+		await delay(5000);
         await relaunch();
     } else {
 			toast.success("최신 버전입니다!");

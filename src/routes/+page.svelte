@@ -7,11 +7,15 @@
   import { exit } from '@tauri-apps/plugin-process';
   import Input from '@/components/ui/input/input.svelte';
   import { Label } from '@/components/ui/label';
+  import MaterialSymbolsKeyboardArrowDownRounded from '~icons/material-symbols/keyboard-arrow-down-rounded';
+  import MaterialSymbolsKeyboardArrowUpRounded from '~icons/material-symbols/keyboard-arrow-up-rounded';
+  import toast from 'svelte-hot-french-toast';
 
   let procState = $state(0);
   let pLocation = $state<PlayerInfo>();
   let ipAddress = $state('');
   let port = $state('');
+  let settingsExpanded = $state<boolean>(false);
 
   $effect(() => {
     checkUpdates();
@@ -26,6 +30,32 @@
       .catch(() => {
         procState = 0;
       });
+  }
+  async function applyAndRestart(event: Event) {
+    event.preventDefault();
+    const handler = async () => {
+      const ipAddr = ipAddress === '' ? undefined : ipAddress;
+      let regexp = /^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/g;
+      if (ipAddr !== undefined && !regexp.test(ipAddr)) {
+        toast.error('IP 주소 형식이 올바르지 않습니다.');
+        return;
+      }
+
+      let portNumber = port === '' ? undefined : +port;
+      if (
+        portNumber !== undefined &&
+        (Number.isNaN(portNumber) ||
+          !Number.isSafeInteger(portNumber) ||
+          0 > portNumber ||
+          portNumber > 65535)
+      ) {
+        toast.error('포트 번호가 올바르지 않습니다.');
+        return;
+      }
+      await invoke('write_config', { ip: ipAddress, port: portNumber });
+      await invoke('restart_server');
+    };
+    await handler();
   }
   async function quit() {
     await exit(0);
@@ -51,16 +81,41 @@
     <Button onclick={attach}>연결</Button>
     <Button onclick={quit} variant="destructive">프로그램 종료</Button>
   </div>
-<div class="mt-4 text-md">고급 설정</div>
+  <div class="flex flex-row">
+    <Button
+      variant="link"
+      class="mt-4"
+      onclick={() => {
+        settingsExpanded = !settingsExpanded;
+      }}
+    >
+      {#if settingsExpanded}
+        <MaterialSymbolsKeyboardArrowDownRounded class="" />
+      {:else}
+        <MaterialSymbolsKeyboardArrowUpRounded class="" />
+      {/if}
+      고급 설정
+    </Button>
+  </div>
+  {#if settingsExpanded}
     <!-- IP 주소와 포트 수동 설정 UI -->
     <div class="flex flex-row mt-2 space-x-2">
       <div>
         <Label for="ip">IP 주소</Label>
-        <Input id="ip" type="text" bind:value={ipAddress} placeholder="0.0.0.0" />
+        <Input
+          id="ip"
+          type="text"
+          bind:value={ipAddress}
+          placeholder="0.0.0.0"
+        />
       </div>
       <div>
         <Label for="port">포트</Label>
         <Input id="port" type="number" bind:value={port} placeholder="46821" />
       </div>
     </div>
+    <span>
+      <Button class="mt-2" onclick={applyAndRestart}>서버 재시작</Button>
+    </span>
+  {/if}
 </main>

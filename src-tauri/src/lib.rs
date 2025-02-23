@@ -10,10 +10,10 @@ use server::ServerManager;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    AppHandle, Manager, WindowEvent,
 };
 use tokio::sync::Mutex;
-use types::PlayerInfo;
+use types::{LocalStorageConfig, PlayerInfo};
 use util::get_config;
 
 struct AppState {
@@ -45,16 +45,51 @@ async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, S
     return proc.get_location();
 }
 
+#[tauri::command]
+async fn write_config(
+    app_handle: AppHandle,
+    ip: Option<String>,
+    port: Option<u16>,
+) -> Result<(), String> {
+    let Ok(_) = util::write_config(app_handle, LocalStorageConfig { ip, port }).await else {
+        return Err(String::from("Error while saving config"));
+    };
+    Ok(())
+}
+
+#[tauri::command]
+async fn restart_server(app_handle: AppHandle) -> Result<(), String> {
+    restart_server_impl(app_handle).await;
+    Ok(())
+}
+
+async fn restart_server_impl(app_handle: AppHandle) {
+    let config = get_config(app_handle.clone()).await.unwrap_or_default();
+    app_handle
+        .clone()
+        .state::<AppState>()
+        .server_manager
+        .lock()
+        .await
+        .restart(
+            app_handle,
+            config.ip.unwrap_or(String::from("0.0.0.0")),
+            config.port.unwrap_or(46821),
+        )
+        .await;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            let _ = app.get_webview_window("main")
-                       .expect("no main window")
-                       .set_focus();
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = app
+                .get_webview_window("main")
+                .expect("no main window")
+                .set_focus();
         }));
     }
     builder
@@ -73,8 +108,6 @@ pub async fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let app_handle = app.handle().clone();
-
             let quit_menu = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
             let show_menu = MenuItem::with_id(app, "show", "창 표시", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_menu, &quit_menu])?;
@@ -124,22 +157,7 @@ pub async fn run() {
             }
 
             let handle = app.handle().clone();
-            tokio::spawn(async move {
-                // write_config(app_handle.clone(), LocalStorageConfig::default()).await.unwrap();
-                // Get config
-                let config = get_config(app_handle.clone()).await.unwrap_or_default();
-                handle
-                    .state::<AppState>()
-                    .server_manager
-                    .lock()
-                    .await
-                    .start(
-                        app_handle,
-                        config.ip.unwrap_or(String::from("0.0.0.0")),
-                        config.port.unwrap_or(46821),
-                    )
-                    .await;
-            });
+            tokio::spawn(async move { restart_server_impl(handle).await });
 
             // Actix 서버를 setup 단계에서 비동기적으로 시작
             // tokio::spawn(async move {
@@ -147,7 +165,12 @@ pub async fn run() {
             // });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![find_and_attach, get_location])
+        .invoke_handler(tauri::generate_handler![
+            find_and_attach,
+            get_location,
+            write_config,
+            restart_server
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
