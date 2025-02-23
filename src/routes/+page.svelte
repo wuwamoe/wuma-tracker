@@ -10,6 +10,7 @@
   import MaterialSymbolsKeyboardArrowDownRounded from '~icons/material-symbols/keyboard-arrow-down-rounded';
   import MaterialSymbolsKeyboardArrowUpRounded from '~icons/material-symbols/keyboard-arrow-up-rounded';
   import toast from 'svelte-hot-french-toast';
+  import type AppConfig from '@/types/Config';
 
   let procState = $state(0);
   let pLocation = $state<PlayerInfo>();
@@ -19,7 +20,30 @@
 
   $effect(() => {
     checkUpdates();
+    invoke<AppConfig>('channel_get_config').then((config) => {
+      if (isIpValid(config.ip)) {
+        ipAddress = config.ip ?? '';
+      }
+      if (isPortValid(config.port)) {
+        port = `${config.port ?? ''}`;
+      }
+    });
   });
+
+  function isIpValid(ipAddr?: string): boolean {
+    let regexp = /^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/g;
+    return !(ipAddr !== undefined && !regexp.test(ipAddr));
+  }
+
+  function isPortValid(portNumber?: number): boolean {
+    return !(
+      portNumber !== undefined &&
+      (Number.isNaN(portNumber) ||
+        !Number.isSafeInteger(portNumber) ||
+        0 >= portNumber ||
+        portNumber > 65535)
+    );
+  }
 
   async function attach(event: Event) {
     event.preventDefault();
@@ -34,25 +58,18 @@
   async function applyAndRestart(event: Event) {
     event.preventDefault();
     const handler = async () => {
-      const ipAddr = ipAddress === '' ? undefined : ipAddress;
-      let regexp = /^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/g;
-      if (ipAddr !== undefined && !regexp.test(ipAddr)) {
+      const ipAddr = ipAddress === null || ipAddress === '' ? undefined : ipAddress;
+      if (!isIpValid(ipAddr)) {
         toast.error('IP 주소 형식이 올바르지 않습니다.');
         return;
       }
 
-      let portNumber = port === '' ? undefined : +port;
-      if (
-        portNumber !== undefined &&
-        (Number.isNaN(portNumber) ||
-          !Number.isSafeInteger(portNumber) ||
-          0 > portNumber ||
-          portNumber > 65535)
-      ) {
+      let portNumber = port === null || port === '' ? undefined : +port;
+      if (!isPortValid(portNumber)) {
         toast.error('포트 번호가 올바르지 않습니다.');
         return;
       }
-      await invoke('write_config', { ip: ipAddress, port: portNumber });
+      await invoke('write_config', { ip: ipAddr, port: portNumber });
       await invoke('restart_server');
     };
     await handler();

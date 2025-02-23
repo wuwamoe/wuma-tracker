@@ -63,6 +63,14 @@ async fn restart_server(app_handle: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
+    let Ok(config) = util::get_config(app_handle).await else {
+        return Err(String::from("Error while getting config"))
+    };
+    Ok(config)
+}
+
 async fn restart_server_impl(app_handle: AppHandle) {
     let config = get_config(app_handle.clone()).await.unwrap_or_default();
     app_handle
@@ -169,7 +177,8 @@ pub async fn run() {
             find_and_attach,
             get_location,
             write_config,
-            restart_server
+            restart_server,
+            channel_get_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
