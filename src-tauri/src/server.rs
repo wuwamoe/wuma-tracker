@@ -146,6 +146,7 @@ impl ServerManager {
                         }
                         Err(e) => {
                             let _ = handle.emit("tracker-error", e);
+                            tokio::time::sleep(Duration::from_millis(500)).await;
                         }
                     }
                 }
