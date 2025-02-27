@@ -17,6 +17,7 @@
   let ipAddress = $state('');
   let port = $state('');
   let settingsExpanded = $state<boolean>(false);
+  let trackerError = $state('');
 
   $effect(() => {
     checkUpdates();
@@ -81,6 +82,10 @@
   listen<PlayerInfo>('handle-location-change', (e) => {
     pLocation = e.payload;
   });
+
+  listen<string>('tracker-error', (e) => {
+    trackerError = e.payload;
+  } )
 </script>
 
 <main class="flex flex-col py-2 px-4">
@@ -115,6 +120,7 @@
     </Button>
   </div>
   {#if settingsExpanded}
+  <div class="text-base">{`트래커 상태: ${trackerError == '' ? '없음' : trackerError}`}</div>
     <!-- IP 주소와 포트 수동 설정 UI -->
     <div class="flex flex-row mt-2 space-x-2">
       <div>

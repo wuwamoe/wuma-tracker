@@ -82,7 +82,7 @@ impl WinProc {
                 "Value retreival failure({}): {:X}",
                 "RelativeLocation, RelativeRotation", target
             );
-            log::error!("{}", msg);
+            // log::error!("{}", msg);
             return Err(msg);
         };
 
@@ -108,7 +108,7 @@ impl WinProc {
                 "Value retreival failure({}): {:X}",
                 "LastWorldOrigin", target
             );
-            log::error!("{}", msg);
+            // log::error!("{}", msg);
             return Err(msg);
         };
 

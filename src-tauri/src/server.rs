@@ -129,6 +129,7 @@ impl ServerManager {
         if count == 0 {
             let mut ticker = state.ticker_handle.lock().unwrap();
             let ticker_state = state.clone();
+            let handle = ticker_state.app_handle.clone();
 
             *ticker = Some(tokio::spawn(async move {
                 let app_handle = ticker_state.app_handle.clone();
@@ -138,11 +139,15 @@ impl ServerManager {
                     let Some(ref proc) = *proc_lock else {
                         continue;
                     };
-                    let Ok(loc) = proc.get_location() else {
-                        continue;
-                    };
-                    let _ = ticker_state.tx.send(loc);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    match proc.get_location() {
+                        Ok(loc) => {
+                            let _ = ticker_state.tx.send(loc);
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                        Err(e) => {
+                            let _ = handle.emit("tracker-error", e);
+                        }
+                    }
                 }
             }))
         }
