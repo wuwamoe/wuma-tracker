@@ -11,6 +11,7 @@
   import MaterialSymbolsKeyboardArrowUpRounded from '~icons/material-symbols/keyboard-arrow-up-rounded';
   import toast from 'svelte-hot-french-toast';
   import type AppConfig from '@/types/Config';
+  import { getVersion } from '@tauri-apps/api/app';
 
   let procState = $state(0);
   let pLocation = $state<PlayerInfo>();
@@ -18,6 +19,7 @@
   let port = $state('');
   let settingsExpanded = $state<boolean>(false);
   let trackerError = $state('');
+  let appversion = $state('');
 
   $effect(() => {
     checkUpdates();
@@ -29,6 +31,7 @@
         port = `${config.port ?? ''}`;
       }
     });
+    getVersion().then(x => appversion = x);
   });
 
   function isIpValid(ipAddr?: string): boolean {
@@ -89,7 +92,11 @@
 </script>
 
 <main class="flex flex-col py-2 px-4">
-  <h1 class="text-2xl mb-2 font-bold">명조 맵스 트래커</h1>
+  <div class="flex flex-row">
+    <h1 class="text-2xl mb-2 font-bold">명조 맵스 트래커</h1>
+    <div class="text-sm ms-1">{appversion}</div>
+  </div>
+  
   <div class="text-lg">
     상태: {procState == 0 ? '🔴 게임 연결되지 않음' : '🟢 게임 연결됨'}
   </div>
