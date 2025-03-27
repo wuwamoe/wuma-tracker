@@ -7,9 +7,11 @@
   import { exit } from '@tauri-apps/plugin-process';
   import Input from '@/components/ui/input/input.svelte';
   import { Label } from '@/components/ui/label';
+  // Shadcn-svelte RadioGroup 컴포넌트 임포트
+  import * as RadioGroup from '@/components/ui/radio-group';
   import MaterialSymbolsKeyboardArrowDownRounded from '~icons/material-symbols/keyboard-arrow-down-rounded';
   import MaterialSymbolsKeyboardArrowUpRounded from '~icons/material-symbols/keyboard-arrow-up-rounded';
-  import toast from 'svelte-hot-french-toast';
+  import toast from 'svelte-5-french-toast';
   import type AppConfig from '@/types/Config';
   import { getVersion } from '@tauri-apps/api/app';
 
@@ -20,6 +22,8 @@
   let settingsExpanded = $state<boolean>(false);
   let trackerError = $state('');
   let appversion = $state('');
+  // RadioGroup 선택 값을 저장할 상태 변수 추가 (기본값 'type-a')
+  let selectedType = $state<'type-a' | 'type-b'>('type-a');
 
   $effect(() => {
     checkUpdates();
@@ -30,8 +34,10 @@
       if (isPortValid(config.port)) {
         port = `${config.port ?? ''}`;
       }
+      // TODO: 설정 파일 로드 시 selectedType 값 불러오기 (선택 사항)
+      // 예: if (config.selectedType) selectedType = config.selectedType;
     });
-    getVersion().then(x => appversion = x);
+    getVersion().then((x) => (appversion = x));
   });
 
   function isIpValid(ipAddr?: string): boolean {
@@ -62,7 +68,8 @@
   async function applyAndRestart(event: Event) {
     event.preventDefault();
     const handler = async () => {
-      const ipAddr = ipAddress === null || ipAddress === '' ? undefined : ipAddress;
+      const ipAddr =
+        ipAddress === null || ipAddress === '' ? undefined : ipAddress;
       if (!isIpValid(ipAddr)) {
         toast.error('IP 주소 형식이 올바르지 않습니다.');
         return;
@@ -73,6 +80,8 @@
         toast.error('포트 번호가 올바르지 않습니다.');
         return;
       }
+      // TODO: 설정 저장 시 selectedType 값 포함 (선택 사항)
+      // 예: await invoke('write_config', { ip: ipAddr, port: portNumber, selectedType: selectedType });
       await invoke('write_config', { ip: ipAddr, port: portNumber });
       await invoke('restart_server');
     };
@@ -88,7 +97,7 @@
 
   listen<string>('tracker-error', (e) => {
     trackerError = e.payload;
-  } )
+  });
 </script>
 
 <main class="flex flex-col py-2 px-4">
@@ -96,7 +105,6 @@
     <h1 class="text-2xl mb-2 font-bold">명조 맵스 트래커</h1>
     <div class="text-sm ms-1">{appversion}</div>
   </div>
-  
   <div class="text-lg">
     상태: {procState == 0 ? '🔴 게임 연결되지 않음' : '🟢 게임 연결됨'}
   </div>
@@ -105,14 +113,13 @@
       플레이어 위치: {`(${Math.round(pLocation.x / 100)}, ${Math.round(pLocation.y / 100)}, ${Math.round(pLocation.z / 100)})`}
     </div>
   {/if}
-
-  <div class="flex flex-row space-x-2 mt-2">
+  <div class="flex flex-row space-x-2 mt-4">
     <Button onclick={attach}>연결</Button>
     <Button onclick={quit} variant="destructive">프로그램 종료</Button>
   </div>
   <div class="flex flex-row">
     <Button
-      variant="link"
+      variant="ghost"
       class="mt-4"
       onclick={() => {
         settingsExpanded = !settingsExpanded;
@@ -127,8 +134,9 @@
     </Button>
   </div>
   {#if settingsExpanded}
-  <div class="text-base">{`트래커 상태: ${trackerError == '' ? '없음' : trackerError}`}</div>
-    <!-- IP 주소와 포트 수동 설정 UI -->
+    <div class="text-base mt-2">
+      {`트래커 오류: ${trackerError == '' ? '없음' : trackerError}`}
+    </div>
     <div class="flex flex-row mt-2 space-x-2">
       <div>
         <Label for="ip">IP 주소</Label>

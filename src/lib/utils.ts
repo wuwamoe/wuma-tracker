@@ -2,10 +2,10 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from '@tauri-apps/plugin-process';
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
-import toast from "svelte-hot-french-toast";
+import toast from "svelte-5-french-toast";
 
 export function cn(...inputs: ClassValue[]) {
-    return twMerge(clsx(inputs));
+	return twMerge(clsx(inputs));
 }
 
 export function delay(ms: number) {
