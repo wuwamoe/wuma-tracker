@@ -65,10 +65,10 @@ async fn restart_server(app_handle: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
-    let Ok(config) = util::get_config(app_handle).await else {
-        return Err(String::from("Error while getting config"))
-    };
-    Ok(config)
+    match util::get_config(app_handle).await {
+        Ok(config) => return Ok(config),
+        Err(e) => return Err(e.to_string())
+    }
 }
 
 async fn restart_server_impl(app_handle: AppHandle) {
