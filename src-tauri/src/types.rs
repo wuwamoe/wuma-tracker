@@ -34,9 +34,11 @@ pub struct FIntVector {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalStorageConfig {
     pub ip: Option<String>,
     pub port: Option<u16>,
+    pub use_secure_connection: Option<bool>,
 }
 
 impl Default for LocalStorageConfig {
@@ -44,6 +46,23 @@ impl Default for LocalStorageConfig {
         LocalStorageConfig {
             ip: None,
             port: None,
+            use_secure_connection: None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalState {
+    pub proc_state: i32,
+    pub server_state: i32,
+}
+
+impl Default for GlobalState {
+    fn default() -> GlobalState {
+        GlobalState {
+            proc_state: 0,
+            server_state: 0,
         }
     }
 }

@@ -29,10 +29,11 @@
   // AppConfig 인터페이스는 useSecureConnection 필드를 포함하도록 업데이트 필요
   import type AppConfig from '@/types/Config';
   import { checkUpdates } from '$lib/utils';
+  import type GlobalState from '@/types/GlobalState';
 
   // --- 상태 변수 ---
   let procState = $state(0); // 0: 게임 연결 안됨, 1: 게임 연결됨
-  let serverState = $state(0); // 0: 서버 비활성, 1: 서버 활성 (백엔드로부터 받음)
+  let globalState = $state<GlobalState>({ procState: 0, serverState: 0 }); // 0: 서버 비활성, 1: 서버 활성 (백엔드로부터 받음)
   let pLocation = $state<PlayerInfo>(); // 플레이어 위치 정보
   let ipAddress = $state(''); // IP 주소 입력값
   let port = $state(''); // 포트 번호 입력값
@@ -47,48 +48,62 @@
     checkUpdates();
 
     // 저장된 설정 불러오기
-    invoke<AppConfig>('channel_get_config').then((config) => {
-      if (isIpValid(config.ip)) {
-        ipAddress = config.ip ?? '';
-      }
-      if (isPortValid(config.port)) {
-        port = `${config.port ?? ''}`;
-      }
-      // 보안 연결 설정 불러오기 (기본값 false)
-      useSecureConnection = config.useSecureConnection ?? false;
-    }).catch(err => {
-      console.error("Failed to load config:", err);
-      toast.error("설정 불러오기 실패");
-    });
+    invoke<AppConfig>('channel_get_config')
+      .then((config) => {
+        if (isIpValid(config.ip)) {
+          ipAddress = config.ip ?? '';
+        }
+        if (isPortValid(config.port)) {
+          port = `${config.port ?? ''}`;
+        }
+        // 보안 연결 설정 불러오기 (기본값 false)
+        useSecureConnection = config.useSecureConnection ?? false;
+      })
+      .catch((err) => {
+        console.error('Failed to load config:', err);
+        toast.error('설정 불러오기 실패');
+      });
+
+    // 전역 상태 동기화
+    invoke<GlobalState>('channel_get_global_state')
+      .then((state) => {
+        globalState = state;
+      })
+      .catch((err) => {
+        console.error('전역 상태 동기화 실패:', err);
+      });
 
     // 앱 버전 가져오기
-    getVersion().then((x) => (appversion = x)).catch(err => {
-        console.error("Failed to get app version:", err);
-    });
+    getVersion()
+      .then((x) => (appversion = x))
+      .catch((err) => {
+        console.error('Failed to get app version:', err);
+      });
 
     // --- 이벤트 리스너 설정 ---
     // 플레이어 위치 변경 리스너
-    const unlistenLocation = listen<PlayerInfo>('handle-location-change', (e) => {
-      pLocation = e.payload;
-    });
+    const unlistenLocation = listen<PlayerInfo>(
+      'handle-location-change',
+      (e) => {
+        pLocation = e.payload;
+      },
+    );
     // 트래커 오류 리스너
     const unlistenError = listen<string>('tracker-error', (e) => {
       trackerError = e.payload;
-      if (e.payload) {
-        toast.error(`트래커 오류: ${e.payload}`);
-      }
     });
-    // 서버 상태 변경 리스너 (백엔드 이벤트 이름 가정: 'handle-server-state-change')
-    // 백엔드에서 상태를 숫자로 보낸다고 가정 (0: 비활성, 1: 활성)
-    const unlistenServerState = listen<number>('handle-server-state-change', (e) => {
-        serverState = e.payload;
-    });
+    const unlistenServerState = listen<GlobalState>(
+      'handle-global-state-change',
+      (e) => {
+        globalState = e.payload;
+      },
+    );
 
     // 컴포넌트 언마운트 시 리스너 해제
     return () => {
-      unlistenLocation.then(f => f());
-      unlistenError.then(f => f());
-      unlistenServerState.then(f => f()); // 서버 상태 리스너 해제 추가
+      unlistenLocation.then((f) => f());
+      unlistenError.then((f) => f());
+      unlistenServerState.then((f) => f()); // 서버 상태 리스너 해제 추가
     };
   });
 
@@ -99,31 +114,31 @@
   }
 
   function isPortValid(portNumber?: number): boolean {
-    return portNumber === undefined || (!Number.isNaN(portNumber) &&
-      Number.isSafeInteger(portNumber) &&
-      portNumber > 0 &&
-      portNumber <= 65535);
+    return (
+      portNumber === undefined ||
+      (!Number.isNaN(portNumber) &&
+        Number.isSafeInteger(portNumber) &&
+        portNumber > 0 &&
+        portNumber <= 65535)
+    );
   }
 
   // --- 이벤트 핸들러 ---
   async function attach(event: Event) {
     event.preventDefault();
-    toast.promise(
-      invoke('find_and_attach'),
-      {
-        loading: '게임 프로세스 찾는 중...',
-        success: () => {
-          procState = 1;
-          trackerError = '';
-          return '게임에 성공적으로 연결되었습니다.';
-        },
-        error: (err) => {
-          procState = 0;
-          console.error("Attach failed:", err);
-          return `게임 연결 실패: ${err instanceof Error ? err.message : String(err)}`;
-        }
-      }
-    );
+    toast.promise(invoke('find_and_attach'), {
+      loading: '게임 프로세스 찾는 중...',
+      success: () => {
+        procState = 1;
+        trackerError = '';
+        return '게임에 성공적으로 연결되었습니다.';
+      },
+      error: (err) => {
+        procState = 0;
+        console.error('Attach failed:', err);
+        return `게임 연결 실패: ${err instanceof Error ? err.message : String(err)}`;
+      },
+    });
   }
 
   async function applyAndRestart(event: Event) {
@@ -145,24 +160,21 @@
     const handler = async () => {
       // write_config 호출 시 useSecureConnection 값 포함
       await invoke('write_config', {
-          ip: ipAddr,
-          port: portNumber,
-          useSecureConnection: useSecureConnection // 보안 연결 설정 저장
+        ip: ipAddr,
+        port: portNumber,
+        useSecureConnection: useSecureConnection, // 보안 연결 설정 저장
       });
       await invoke('restart_server');
     };
 
-    toast.promise(
-      handler(),
-      {
-        loading: '설정 저장 및 서버 재시작 중...',
-        success: '설정이 적용되었고 서버가 재시작되었습니다.',
-        error: (err) => {
-          console.error("Apply and restart failed:", err);
-          return `작업 실패: ${err instanceof Error ? err.message : String(err)}`;
-        }
-      }
-    );
+    toast.promise(handler(), {
+      loading: '설정 저장 및 서버 재시작 중...',
+      success: '설정이 적용되었고 서버가 재시작되었습니다.',
+      error: (err) => {
+        console.error('Apply and restart failed:', err);
+        return `작업 실패: ${err instanceof Error ? err.message : String(err)}`;
+      },
+    });
   }
 
   async function quit() {
@@ -180,34 +192,48 @@
     </div>
 
     <div class="flex items-center space-x-2">
-      <div class={`w-3 h-3 rounded-full animate-pulse ${procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}></div>
+      <div
+        class={`w-3 h-3 rounded-full animate-pulse ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+      ></div>
       <p class="font-medium">
-        {procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
+        {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
       </p>
     </div>
 
     <div class="flex items-center space-x-2">
-       <div class={`w-3 h-3 rounded-full animate-pulse ${serverState === 0 ? 'bg-yellow-500' : 'bg-blue-500'}`}></div>
-       <p class="font-medium">
-         {serverState === 0 ? '내부 서버 비활성' : '내부 서버 활성'}
-       </p>
+      <div
+        class={`w-3 h-3 rounded-full animate-pulse ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+      ></div>
+      <p class="font-medium">
+        {globalState.serverState === 0 ? '내부 서버 비활성' : '내부 서버 활성'}
+      </p>
     </div>
 
-    {#if procState === 1 && pLocation}
+    {#if globalState.procState === 1 && pLocation}
       <div class="bg-muted p-3 rounded-md text-sm">
         <p class="font-medium mb-2">플레이어 위치</p>
         <div class="grid grid-cols-3 gap-2 text-center">
-          <div class="bg-background p-1.5 rounded">X: {Math.round(pLocation.x / 100)}</div>
-          <div class="bg-background p-1.5 rounded">Y: {Math.round(pLocation.y / 100)}</div>
-          <div class="bg-background p-1.5 rounded">Z: {Math.round(pLocation.z / 100)}</div>
+          <div class="bg-background p-1.5 rounded">
+            X: {Math.round(pLocation.x / 100)}
+          </div>
+          <div class="bg-background p-1.5 rounded">
+            Y: {Math.round(pLocation.y / 100)}
+          </div>
+          <div class="bg-background p-1.5 rounded">
+            Z: {Math.round(pLocation.z / 100)}
+          </div>
         </div>
       </div>
     {/if}
 
     <div class="flex space-x-3 pt-2">
-      <Button class="flex-1" onclick={attach} disabled={procState === 1}>
+      <Button class="flex-1" onclick={attach}>
         <IconConnection class="mr-2 h-4 w-4" />
-        {#if procState === 1} 연결됨 {:else} 게임 연결 {/if}
+        {#if globalState.procState === 1}
+          재연결
+        {:else}
+          게임 연결
+        {/if}
       </Button>
       <Button variant="destructive" class="flex-1" onclick={quit}>
         <IconPower class="mr-2 h-4 w-4" />
@@ -217,7 +243,11 @@
   </div>
 
   <div class="space-y-4">
-    <Button variant="ghost" class="w-full justify-between text-left px-3 py-2 border rounded-lg" onclick={() => settingsExpanded = !settingsExpanded}>
+    <Button
+      variant="ghost"
+      class="w-full justify-between text-left px-3 py-2 border rounded-lg"
+      onclick={() => (settingsExpanded = !settingsExpanded)}
+    >
       고급 설정
       {#if settingsExpanded}
         <MaterialSymbolsKeyboardArrowUpRounded class="h-5 w-5" />
@@ -234,29 +264,49 @@
             <AlertDescription>{trackerError}</AlertDescription>
           </Alert>
         {:else}
-          <div class="text-sm text-muted-foreground p-3 bg-muted rounded-md">현재 보고된 트래커 오류 없음</div>
+          <div class="text-sm text-muted-foreground p-3 bg-muted rounded-md">
+            현재 보고된 트래커 오류 없음
+          </div>
         {/if}
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label for="ip">IP 주소 (기본값: 0.0.0.0)</Label>
-            <Input id="ip" type="text" bind:value={ipAddress} placeholder="0.0.0.0" />
+            <Input
+              id="ip"
+              type="text"
+              bind:value={ipAddress}
+              placeholder="0.0.0.0"
+            />
             {#if ipAddress.trim() !== '' && !isIpValid(ipAddress)}
-             <p class="text-xs text-destructive">올바른 IPv4 주소 형식이 아닙니다.</p>
+              <p class="text-xs text-destructive">
+                올바른 IPv4 주소 형식이 아닙니다.
+              </p>
             {/if}
           </div>
           <div class="space-y-1.5">
             <Label for="port">포트 (기본값: 46821)</Label>
-            <Input id="port" type="number" bind:value={port} placeholder="46821" min="1" max="65535" />
-             {#if port.trim() !== '' && !isPortValid(port === '' ? undefined : +port)}
-               <p class="text-xs text-destructive">1 ~ 65535 사이의 숫자를 입력하세요.</p>
-             {/if}
+            <Input
+              id="port"
+              type="number"
+              bind:value={port}
+              placeholder="46821"
+              min="1"
+              max="65535"
+            />
+            {#if port.trim() !== '' && !isPortValid(port === '' ? undefined : +port)}
+              <p class="text-xs text-destructive">
+                1 ~ 65535 사이의 숫자를 입력하세요.
+              </p>
+            {/if}
           </div>
         </div>
 
         <div class="flex items-center space-x-2 pt-3">
           <Checkbox id="secure-connection" bind:checked={useSecureConnection} />
-          <Label for="secure-connection" class="font-normal cursor-pointer">보안 연결 (HTTPS/WSS) 사용</Label>
+          <Label for="secure-connection" class="font-normal cursor-pointer"
+            >보안 연결 (HTTPS/WSS) 사용</Label
+          >
         </div>
 
         <Button onclick={applyAndRestart} class="w-full mt-4">

@@ -13,24 +13,41 @@ use tauri::{
     AppHandle, Manager, WindowEvent,
 };
 use tokio::sync::Mutex;
-use types::{LocalStorageConfig, PlayerInfo};
+use types::{GlobalState, LocalStorageConfig, PlayerInfo};
 use util::get_config;
 
 struct AppState {
     proc: Mutex<Option<WinProc>>,
     server_manager: Arc<Mutex<ServerManager>>,
+    global_state: Arc<Mutex<GlobalState>>,
 }
 
 #[tauri::command]
-async fn find_and_attach(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn find_and_attach(app_handle: AppHandle) -> Result<(), String> {
     let Ok(mut win_proc) = WinProc::from_name("Client-Win64-Shipping.exe") else {
-        return Err(String::from("FAILED FIND PROC"));
+        let _ = util::mutate_global_state(app_handle, |old| GlobalState {
+            proc_state: 0,
+            ..old
+        })
+        .await;
+        return Err(String::from("게임이 실행 중이 아닙니다."));
     };
 
     if !win_proc.init() {
-        return Err(String::from("FAILED ATTACH PROC"));
+        let _ = util::mutate_global_state(app_handle, |old| GlobalState {
+            proc_state: 0,
+            ..old
+        })
+        .await;
+        return Err(String::from("게임에 연결하지 못했습니다."));
     }
+    let state = app_handle.state::<AppState>();
     *state.proc.lock().await = Some(win_proc);
+    let _ = util::mutate_global_state(app_handle, |old| GlobalState {
+        proc_state: 1,
+        ..old
+    })
+    .await;
     Ok(())
 }
 
@@ -50,8 +67,18 @@ async fn write_config(
     app_handle: AppHandle,
     ip: Option<String>,
     port: Option<u16>,
+    use_secure_connection: Option<bool>,
 ) -> Result<(), String> {
-    let Ok(_) = util::write_config(app_handle, LocalStorageConfig { ip, port }).await else {
+    let Ok(_) = util::write_config(
+        app_handle,
+        LocalStorageConfig {
+            ip,
+            port,
+            use_secure_connection,
+        },
+    )
+    .await
+    else {
         return Err(String::from("Error while saving config"));
     };
     Ok(())
@@ -67,7 +94,23 @@ async fn restart_server(app_handle: AppHandle) -> Result<(), String> {
 async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
     match util::get_config(app_handle).await {
         Ok(config) => return Ok(config),
-        Err(e) => return Err(e.to_string())
+        Err(e) => return Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn channel_get_global_state(app_handle: AppHandle) -> Result<GlobalState, String> {
+    match util::get_global_state(app_handle).await {
+        Ok(gs) => return Ok(gs),
+        Err(e) => return Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> Result<(), String> {
+    match util::set_global_state(app_handle, value).await {
+        Ok(_) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
     }
 }
 
@@ -104,6 +147,7 @@ pub async fn run() {
         .manage(AppState {
             proc: Mutex::new(None),
             server_manager: Arc::new(Mutex::new(ServerManager::default())),
+            global_state: Arc::new(Mutex::new(GlobalState::default())),
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -178,7 +222,9 @@ pub async fn run() {
             get_location,
             write_config,
             restart_server,
-            channel_get_config
+            channel_get_config,
+            channel_get_global_state,
+            channel_set_global_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
