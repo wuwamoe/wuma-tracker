@@ -22,18 +22,20 @@
   import IconConnection from '~icons/mdi/connection';
   import IconPower from '~icons/mdi/power';
   import IconRestart from '~icons/mdi/restart';
-  import IconServer from '~icons/mdi/server'; // 서버 상태 아이콘 (선택 사항)
+  import IconServer from '~icons/mdi/server'; // 서버 상태 아이콘
+  import MaterialSymbolsContentCopyOutline from '~icons/material-symbols/content-copy-outline';
+  import IconLinkVariant from '~icons/mdi/link-variant'; // 연결 URL 아이콘 추가
 
   // 타입 및 유틸리티 임포트
   import type PlayerInfo from '$lib/types/PlayerInfo';
-  // AppConfig 인터페이스는 useSecureConnection 필드를 포함하도록 업데이트 필요
   import type AppConfig from '@/types/Config';
   import { checkUpdates } from '$lib/utils';
   import type GlobalState from '@/types/GlobalState';
 
-  // --- 상태 변수 ---
-  let procState = $state(0); // 0: 게임 연결 안됨, 1: 게임 연결됨
-  let globalState = $state<GlobalState>({ procState: 0, serverState: 0 }); // 0: 서버 비활성, 1: 서버 활성 (백엔드로부터 받음)
+  let globalState = $state<GlobalState>({
+    procState: 0,
+    serverState: 0,
+  });
   let pLocation = $state<PlayerInfo>(); // 플레이어 위치 정보
   let ipAddress = $state(''); // IP 주소 입력값
   let port = $state(''); // 포트 번호 입력값
@@ -103,7 +105,7 @@
     return () => {
       unlistenLocation.then((f) => f());
       unlistenError.then((f) => f());
-      unlistenServerState.then((f) => f()); // 서버 상태 리스너 해제 추가
+      unlistenServerState.then((f) => f());
     };
   });
 
@@ -129,12 +131,10 @@
     toast.promise(invoke('find_and_attach'), {
       loading: '게임 프로세스 찾는 중...',
       success: () => {
-        procState = 1;
         trackerError = '';
         return '게임에 성공적으로 연결되었습니다.';
       },
       error: (err) => {
-        procState = 0;
         console.error('Attach failed:', err);
         return `게임 연결 실패: ${err instanceof Error ? err.message : String(err)}`;
       },
@@ -164,7 +164,7 @@
         port: portNumber,
         useSecureConnection: useSecureConnection, // 보안 연결 설정 저장
       });
-      await invoke('restart_server');
+      await invoke('restart_server'); // 이 호출 후 백엔드가 상태 변경 이벤트를 보내야 함
     };
 
     toast.promise(handler(), {
@@ -180,6 +180,18 @@
   async function quit() {
     await exit(0);
   }
+
+  // --- 추가: URL 복사 함수 ---
+  async function copyUrlToClipboard() {
+    if (!globalState.connectionUrl) return;
+    try {
+      await navigator.clipboard.writeText(globalState.connectionUrl);
+      toast.success('연결 URL이 클립보드에 복사되었습니다.');
+    } catch (err) {
+      console.error('Failed to copy URL: ', err);
+      toast.error('URL 복사에 실패했습니다.');
+    }
+  }
 </script>
 
 <main class="container max-w-xl mx-auto py-6 px-4 space-y-6">
@@ -193,24 +205,47 @@
 
     <div class="flex items-center space-x-2">
       <div
-        class={`w-3 h-3 rounded-full animate-pulse ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+        class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
       ></div>
-      <p class="font-medium">
+      <p class="font-medium text-md">
         {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
       </p>
     </div>
 
     <div class="flex items-center space-x-2">
       <div
-        class={`w-3 h-3 rounded-full animate-pulse ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+        class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
       ></div>
-      <p class="font-medium">
-        {globalState.serverState === 0 ? '내부 서버 비활성' : '내부 서버 활성'}
+      <p class="font-medium text-md">
+        {globalState.serverState === 0 ? '통신 서버 비활성' : '통신 서버 활성'}
       </p>
     </div>
 
+    {#if globalState.serverState === 1 && globalState.connectionUrl}
+      <div class="flex items-center space-x-2 pt-1">
+        <IconLinkVariant class="h-4 w-4 text-muted-foreground flex-shrink-0" />
+        <p class="text-sm font-medium text-muted-foreground whitespace-nowrap">
+          연결 URL:
+        </p>
+        <code
+          class="text-sm bg-muted px-2 py-1 rounded font-mono break-all select-all"
+        >
+          {globalState.connectionUrl}
+        </code>
+        <button
+          type="button"
+          onclick={copyUrlToClipboard}
+          aria-label="연결 URL 복사"
+          title="클립보드에 복사"
+          class="p-1 text-muted-foreground hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring rounded-sm"
+        >
+          <MaterialSymbolsContentCopyOutline class="h-4 w-4" />
+        </button>
+      </div>
+    {/if}
+
     {#if globalState.procState === 1 && pLocation}
-      <div class="bg-muted p-3 rounded-md text-sm">
+      <div class="bg-muted p-3 rounded-md text-sm mt-2">
         <p class="font-medium mb-2">플레이어 위치</p>
         <div class="grid grid-cols-3 gap-2 text-center">
           <div class="bg-background p-1.5 rounded">
@@ -230,7 +265,7 @@
       <Button class="flex-1" onclick={attach}>
         <IconConnection class="mr-2 h-4 w-4" />
         {#if globalState.procState === 1}
-          재연결
+          게임 재연결
         {:else}
           게임 연결
         {/if}
@@ -247,6 +282,8 @@
       variant="ghost"
       class="w-full justify-between text-left px-3 py-2 border rounded-lg"
       onclick={() => (settingsExpanded = !settingsExpanded)}
+      aria-expanded={settingsExpanded}
+      aria-controls="advanced-settings"
     >
       고급 설정
       {#if settingsExpanded}
@@ -257,7 +294,10 @@
     </Button>
 
     {#if settingsExpanded}
-      <div class="space-y-4 p-4 border rounded-lg bg-background shadow-sm">
+      <div
+        id="advanced-settings"
+        class="space-y-4 p-4 border rounded-lg bg-background shadow-sm"
+      >
         {#if trackerError}
           <Alert variant="destructive">
             <AlertTitle>트래커 오류</AlertTitle>

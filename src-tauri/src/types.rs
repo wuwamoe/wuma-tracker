@@ -56,6 +56,7 @@ impl Default for LocalStorageConfig {
 pub struct GlobalState {
     pub proc_state: i32,
     pub server_state: i32,
+    pub connection_url: Option<String>,
 }
 
 impl Default for GlobalState {
@@ -63,6 +64,7 @@ impl Default for GlobalState {
         GlobalState {
             proc_state: 0,
             server_state: 0,
+            connection_url: None
         }
     }
 }

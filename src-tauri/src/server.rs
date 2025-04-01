@@ -19,7 +19,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{types::{GlobalState, PlayerInfo}, util, AppState};
+use crate::{
+    types::{GlobalState, PlayerInfo},
+    util, AppState,
+};
 
 pub struct ServerManager {
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -59,9 +62,14 @@ impl ServerManager {
             match tokio::net::TcpListener::bind(&format!("{}:{}", ip, port)).await {
                 Ok(listener) => {
                     let handle = app_handle.clone();
-                    let _ = util::mutate_global_state(app_handle, |old| GlobalState {server_state: 1, ..old}).await;
                     let addr = listener.local_addr().unwrap();
                     log::info!("listening on {}", addr);
+                    let _ = util::mutate_global_state(app_handle, |old| GlobalState {
+                        server_state: 1,
+                        connection_url: Some(addr.to_string()),
+                        ..old
+                    })
+                    .await;
 
                     axum::serve(listener, app)
                         .with_graceful_shutdown(async {
@@ -69,12 +77,22 @@ impl ServerManager {
                         })
                         .await
                         .unwrap();
-                    let _ = util::mutate_global_state(handle, |old| GlobalState {server_state: 0, ..old}).await;
+                    let _ = util::mutate_global_state(handle, |old| GlobalState {
+                        server_state: 0,
+                        connection_url: None,
+                        ..old
+                    })
+                    .await;
                     log::info!("gracefully shutting down: {}", addr);
                 }
                 Err(_) => {
                     let handle = app_handle.clone();
-                    let _ = util::mutate_global_state(app_handle, |old| GlobalState {server_state: 0, ..old}).await;
+                    let _ = util::mutate_global_state(app_handle, |old| GlobalState {
+                        server_state: 0,
+                        connection_url: None,
+                        ..old
+                    })
+                    .await;
                     let _ = handle
                         .dialog()
                         .message(
