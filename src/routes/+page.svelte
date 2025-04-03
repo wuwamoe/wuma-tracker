@@ -22,7 +22,7 @@
   import IconConnection from '~icons/mdi/connection';
   import IconPower from '~icons/mdi/power';
   import IconRestart from '~icons/mdi/restart';
-  import IconServer from '~icons/mdi/server'; // 서버 상태 아이콘
+  // import IconServer from '~icons/mdi/server'; // 서버 상태 아이콘
   import MaterialSymbolsContentCopyOutline from '~icons/material-symbols/content-copy-outline';
   import IconLinkVariant from '~icons/mdi/link-variant'; // 연결 URL 아이콘 추가
 
@@ -39,7 +39,7 @@
   let pLocation = $state<PlayerInfo>(); // 플레이어 위치 정보
   let ipAddress = $state(''); // IP 주소 입력값
   let port = $state(''); // 포트 번호 입력값
-  let useSecureConnection = $state(false); // 보안 연결(HTTPS/WSS) 사용 여부
+  // let useSecureConnection = $state(false); // 보안 연결(HTTPS/WSS) 사용 여부
   let settingsExpanded = $state<boolean>(false); // 고급 설정 확장 여부
   let trackerError = $state(''); // 트래커 오류 메시지
   let appversion = $state(''); // 앱 버전
@@ -59,7 +59,7 @@
           port = `${config.port ?? ''}`;
         }
         // 보안 연결 설정 불러오기 (기본값 false)
-        useSecureConnection = config.useSecureConnection ?? false;
+        // useSecureConnection = config.useSecureConnection ?? false;
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -162,7 +162,7 @@
       await invoke('write_config', {
         ip: ipAddr,
         port: portNumber,
-        useSecureConnection: useSecureConnection, // 보안 연결 설정 저장
+        useSecureConnection: null, // 보안 연결 설정 저장
       });
       await invoke('restart_server'); // 이 호출 후 백엔드가 상태 변경 이벤트를 보내야 함
     };
@@ -221,7 +221,7 @@
       </p>
     </div>
 
-    {#if globalState.serverState === 1 && globalState.connectionUrl}
+    <!-- {#if globalState.serverState === 1 && globalState.connectionUrl}
       <div class="flex items-center space-x-2 pt-1">
         <IconLinkVariant class="h-4 w-4 text-muted-foreground flex-shrink-0" />
         <p class="text-sm font-medium text-muted-foreground whitespace-nowrap">
@@ -242,7 +242,7 @@
           <MaterialSymbolsContentCopyOutline class="h-4 w-4" />
         </button>
       </div>
-    {/if}
+    {/if} -->
 
     {#if globalState.procState === 1 && pLocation}
       <div class="bg-muted p-3 rounded-md text-sm mt-2">
@@ -342,12 +342,12 @@
           </div>
         </div>
 
-        <div class="flex items-center space-x-2 pt-3">
+        <!-- <div class="flex items-center space-x-2 pt-3">
           <Checkbox id="secure-connection" bind:checked={useSecureConnection} />
           <Label for="secure-connection" class="font-normal cursor-pointer"
             >보안 연결 (HTTPS/WSS) 사용</Label
           >
-        </div>
+        </div> -->
 
         <Button onclick={applyAndRestart} class="w-full mt-4">
           <IconRestart class="mr-2 h-4 w-4" />
