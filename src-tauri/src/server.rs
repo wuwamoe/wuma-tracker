@@ -137,7 +137,7 @@ impl ServerManager {
                 // In any websocket error, break loop.
                 let _ = handle.emit("handle-location-change", msg);
                 let json = serde_json::to_string(&msg).unwrap();
-                if sender.send(Message::Text(json)).await.is_err() {
+                if sender.send(Message::Text(json.into())).await.is_err() {
                     break;
                 }
             }
