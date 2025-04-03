@@ -26,7 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 winapi = { version = "0.3.9", features = ["handleapi", "memoryapi", "minwindef", "ntdef", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "tlhelp32", "winnt"] }
 tokio = "1.41.0"
-axum = { version = "0.7.7", features = ["ws"] }
+axum = { version = "0.8.3", features = ["ws"] }
 tracing = "0.1.40"
 futures = "0.3.31"
 tauri-plugin-process = "2"
