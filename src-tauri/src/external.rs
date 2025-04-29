@@ -34,8 +34,7 @@ pub struct WinProc {
 
 impl WinProc {
     const OFFSET: WuwaOffset = WuwaOffset {
-        global_gworld: 0x83450B0,
-        // global_gworld: 0x8658908,
+        global_gworld: 0x83B6AF0,
         uworld_persistentlevel: 0x38,
         uworld_owninggameinstance: 0x1B0,
         ulevel_lastworldorigin: 0xC8,
@@ -44,7 +43,6 @@ impl WinProc {
         aplayercontroller_acknowlegedpawn: 0x340,
         aactor_rootcomponent: 0x1A0,
         uscenecomponent_relativelocation: 0x13C,
-        // uscenecomponent_relativerotation: 0x148,
     };
 
     pub fn get_location(&self) -> Result<PlayerInfo, String> {
