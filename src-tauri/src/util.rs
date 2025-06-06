@@ -71,8 +71,6 @@ pub async fn mutate_global_state(
     if guard.clone() == new_value {
         return Ok(());
     }
-    let c= new_value.clone();
-    println!("{}, {}", c.proc_state, c.server_state);
 
     *guard = new_value.clone();
     let _ = app_handle

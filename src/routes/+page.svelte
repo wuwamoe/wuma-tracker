@@ -12,7 +12,7 @@
   import { Button } from '@/components/ui/button';
   import Input from '@/components/ui/input/input.svelte';
   import { Label } from '@/components/ui/label';
-  import { Checkbox } from '@/components/ui/checkbox'; // Checkbox 임포트 추가
+  // Checkbox 임포트 추가
   import { Badge } from '@/components/ui/badge';
   import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
@@ -23,14 +23,14 @@
   import IconPower from '~icons/mdi/power';
   import IconRestart from '~icons/mdi/restart';
   // import IconServer from '~icons/mdi/server'; // 서버 상태 아이콘
-  import MaterialSymbolsContentCopyOutline from '~icons/material-symbols/content-copy-outline';
-  import IconLinkVariant from '~icons/mdi/link-variant'; // 연결 URL 아이콘 추가
+  // 연결 URL 아이콘 추가
 
   // 타입 및 유틸리티 임포트
   import type PlayerInfo from '$lib/types/PlayerInfo';
   import type AppConfig from '@/types/Config';
   import { checkUpdates } from '$lib/utils';
   import type GlobalState from '@/types/GlobalState';
+  import { Checkbox } from '@/components/ui/checkbox';
 
   let globalState = $state<GlobalState>({
     procState: 0,
@@ -43,6 +43,39 @@
   let settingsExpanded = $state<boolean>(false); // 고급 설정 확장 여부
   let trackerError = $state(''); // 트래커 오류 메시지
   let appversion = $state(''); // 앱 버전
+  let autoAttachEnabled = $state(false);
+
+  async function silentAttach() {
+    try {
+      await invoke('find_and_attach');
+      trackerError = '';
+      toast.success('자동으로 게임에 연결되었습니다.');
+    } catch (err) {
+      console.error('Auto-attach failed:', err);
+    }
+  }
+
+  // 게임 연결 폴링
+  $effect(() => {
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+
+    // 자동 연결 기능이 활성화되어 있고, 게임이 연결되지 않았을 때만 인터벌 시작
+    if (autoAttachEnabled && globalState.procState === 0) {
+      intervalId = setInterval(() => {
+        if (globalState.procState === 0) {
+          console.log('자동으로 게임 연결을 시도합니다...');
+          silentAttach();
+        }
+      }, 5000); // 5초
+    }
+
+    // 이 effect가 다시 실행되기 전이나 컴포넌트가 사라질 때 기존 인터벌 정리
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  });
 
   // --- 초기화 및 설정 로드 ---
   $effect(() => {
@@ -60,6 +93,7 @@
         }
         // 보안 연결 설정 불러오기 (기본값 false)
         // useSecureConnection = config.useSecureConnection ?? false;
+        autoAttachEnabled = config.autoAttachEnabled ?? false;
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -163,6 +197,7 @@
         ip: ipAddr,
         port: portNumber,
         useSecureConnection: null, // 보안 연결 설정 저장
+        autoAttachEnabled: autoAttachEnabled,
       });
       await invoke('restart_server'); // 이 호출 후 백엔드가 상태 변경 이벤트를 보내야 함
     };
@@ -203,14 +238,20 @@
       {/if}
     </div>
 
-    <div class="flex items-center space-x-2">
-      <div
+<div class="flex items-center space-x-2">
+    <div
         class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
-      ></div>
-      <p class="font-medium text-md">
+    ></div>
+    <p class="font-medium text-md">
         {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
-      </p>
-    </div>
+    </p>
+    {#if autoAttachEnabled && globalState.procState === 0}
+        <Badge variant="secondary" class="flex items-center gap-1">
+            <IconRestart class="h-3 w-3 animate-spin" />
+            자동 연결 중
+        </Badge>
+    {/if}
+</div>
 
     <div class="flex items-center space-x-2">
       <div
@@ -220,29 +261,6 @@
         {globalState.serverState === 0 ? '통신 서버 비활성' : '통신 서버 활성'}
       </p>
     </div>
-
-    <!-- {#if globalState.serverState === 1 && globalState.connectionUrl}
-      <div class="flex items-center space-x-2 pt-1">
-        <IconLinkVariant class="h-4 w-4 text-muted-foreground flex-shrink-0" />
-        <p class="text-sm font-medium text-muted-foreground whitespace-nowrap">
-          연결 URL:
-        </p>
-        <code
-          class="text-sm bg-muted px-2 py-1 rounded font-mono break-all select-all"
-        >
-          {globalState.connectionUrl}
-        </code>
-        <button
-          type="button"
-          onclick={copyUrlToClipboard}
-          aria-label="연결 URL 복사"
-          title="클립보드에 복사"
-          class="p-1 text-muted-foreground hover:text-foreground focus:outline-none focus:ring-1 focus:ring-ring rounded-sm"
-        >
-          <MaterialSymbolsContentCopyOutline class="h-4 w-4" />
-        </button>
-      </div>
-    {/if} -->
 
     {#if globalState.procState === 1 && pLocation}
       <div class="bg-muted p-3 rounded-md text-sm mt-2">
@@ -348,6 +366,13 @@
             >보안 연결 (HTTPS/WSS) 사용</Label
           >
         </div> -->
+
+        <div class="flex items-center space-x-2 pt-3">
+          <Checkbox id="auto-attach" bind:checked={autoAttachEnabled} />
+          <Label for="auto-attach" class="font-normal cursor-pointer">
+            게임 자동 연결
+          </Label>
+        </div>
 
         <Button onclick={applyAndRestart} class="w-full mt-4">
           <IconRestart class="mr-2 h-4 w-4" />

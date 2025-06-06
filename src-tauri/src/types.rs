@@ -39,6 +39,7 @@ pub struct LocalStorageConfig {
     pub ip: Option<String>,
     pub port: Option<u16>,
     pub use_secure_connection: Option<bool>,
+    pub auto_attach_enabled: Option<bool>,
 }
 
 impl Default for LocalStorageConfig {
@@ -47,6 +48,7 @@ impl Default for LocalStorageConfig {
             ip: None,
             port: None,
             use_secure_connection: None,
+            auto_attach_enabled: None,
         }
     }
 }

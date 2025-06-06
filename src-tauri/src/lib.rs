@@ -68,6 +68,7 @@ async fn write_config(
     ip: Option<String>,
     port: Option<u16>,
     use_secure_connection: Option<bool>,
+    auto_attach_enabled: Option<bool>,
 ) -> Result<(), String> {
     let Ok(_) = util::write_config(
         app_handle,
@@ -75,6 +76,7 @@ async fn write_config(
             ip,
             port,
             use_secure_connection,
+            auto_attach_enabled
         },
     )
     .await
