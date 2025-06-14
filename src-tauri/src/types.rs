@@ -1,3 +1,13 @@
+use std::
+    sync::{atomic::AtomicUsize, Arc}
+;
+use tauri::AppHandle;
+use tokio::{
+    sync::{broadcast, Mutex},
+    task::JoinHandle,
+};
+
+
 #[repr(C)]
 #[derive(Copy, Clone, serde::Serialize)]
 pub struct FVector {
@@ -69,4 +79,49 @@ impl Default for GlobalState {
             connection_url: None
         }
     }
+}
+
+// 클라이언트와 서버 간에 교환될 메시지의 전체 구조
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct SignalingMessage {
+    pub from_id: Option<String>, // 메시지를 보낸 피어의 ID
+    pub target_id: String,       // 메시지를 받을 피어의 ID ("host" 또는 클라이언트의 고유 ID)
+    pub payload: Payload,
+}
+
+// 실제 WebRTC 시그널링 데이터를 담는 부분
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(tag = "type", content = "data")]
+#[serde(rename_all = "kebab-case")]
+pub enum Payload {
+    // SDP (Session Description Protocol)
+    Offer(String),
+    Answer(String),
+    // ICE (Interactive Connectivity Establishment)
+    IceCandidate(String),
+    // 세션 관리 이벤트
+    NewPeer { id: String },
+    PeerLeft { id: String },
+}
+
+pub struct AxumState {
+    pub client_count: Arc<AtomicUsize>,
+    // We require unique usernames. This tracks which usernames have been taken.
+    pub app_handle: AppHandle,
+    // Channel used to send messages to all connected clients.
+    pub tx: broadcast::Sender<PlayerInfo>,
+    pub ticker_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WebRtcPayload {
+    pub sdp: String,
+}
+
+// Answer를 보내기 위한 구조체
+#[derive(serde::Serialize)]
+pub struct WebRtcResponse {
+    #[serde(rename = "type")]
+    pub sdp_type: String,
+    pub sdp: String,
 }
