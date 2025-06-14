@@ -1,12 +1,19 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicUsize, Arc},
+};
 use tauri::AppHandle;
 use tokio::sync::{broadcast, oneshot, Mutex};
 
-use crate::{types::AxumState, webrtc_handler};
+use crate::{
+    types::{AxumState, Peers},
+    webrtc_handler,
+};
 
 pub struct ServerManager {
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    peers: Peers,
 }
 
 impl ServerManager {
@@ -14,6 +21,7 @@ impl ServerManager {
         ServerManager {
             shutdown_tx: Option::None,
             handle: Option::None,
+            peers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -21,7 +29,7 @@ impl ServerManager {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         // let (_, dummy_rx) = oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
-
+        let peers_clone = self.peers.clone();
         self.handle = Some(tokio::spawn(async move {
             // Set up application state for use with with_state().
             let (tx, _rx) = broadcast::channel(100);
@@ -29,11 +37,13 @@ impl ServerManager {
             let ticker_handle = Arc::new(Mutex::new(None));
 
             let app = app_handle.clone();
+
             let axum_state = Arc::new(AxumState {
                 client_count,
                 app_handle: app,
                 tx,
                 ticker_handle,
+                peers: peers_clone,
             });
 
             // 3. 단일 데이터 Ticker 실행
@@ -55,96 +65,37 @@ impl ServerManager {
         self.start(app_handle, ip, port).await;
     }
 
-    // async fn websocket_handler(
-    //     ws: WebSocketUpgrade,
-    //     State(state): State<Arc<AxumState>>,
-    // ) -> impl IntoResponse {
-    //     log::info!("client connected");
-    //     ws.on_upgrade(|socket| Self::websocket(socket, state))
-    // }
+    pub async fn shutdown(&mut self) {
+        let mut peer_map = self.peers.lock().await;
 
-    // // This function deals with a single websocket connection, i.e., a single
-    // // connected client / user, for which we will spawn two independent tasks (for
-    // // receiving / sending chat messages).
-    // async fn websocket(stream: WebSocket, state: Arc<AxumState>) {
-    //     // By splitting, we can send and receive at the same time.
-    //     let (mut sender, mut receiver) = stream.split();
+        if !peer_map.is_empty() {
+            // 2. 모든 피어의 .close() 비동기 작업을 수집
+            let close_futures: Vec<_> = peer_map
+                .drain() // HashMap을 비우면서 모든 값을 가져옴
+                .map(|(_, pc)| async move { pc.close().await })
+                .collect();
 
-    //     let send_state = state.clone();
-    //     let mut send_task = tokio::spawn(async move {
-    //         let mut rx = send_state.tx.subscribe();
-    //         let handle = send_state.app_handle.clone();
-    //         while let Ok(msg) = rx.recv().await {
-    //             // In any websocket error, break loop.
-    //             let _ = handle.emit("handle-location-change", msg);
-    //             let json = serde_json::to_string(&msg).unwrap();
-    //             if sender.send(Message::Text(json.into())).await.is_err() {
-    //                 break;
-    //             }
-    //         }
-    //     });
-    //     let mut recv_task = tokio::spawn(async move {
-    //         while let Some(Ok(Message::Close(_))) = receiver.next().await {
-    //             break;
-    //         }
-    //     });
+            log::info!("Waiting for {} peer(s) to close...", close_futures.len());
 
-    //     let count = Self::get_and_incr(&state.client_count, 1);
-    //     if count == 0 {
-    //         let mut ticker = state.ticker_handle.lock().unwrap();
-    //         let ticker_state = state.clone();
-    //         let handle = ticker_state.app_handle.clone();
+            // 3. join_all을 사용해 모든 .close() 작업이 완료될 때까지 기다림
+            futures::future::join_all(close_futures).await;
+            log::info!("All peer connections closed.");
+        } else {
+            log::info!("No active peer connections to close.");
+        }
 
-    //         *ticker = Some(tokio::spawn(async move {
-    //             let app_handle = ticker_state.app_handle.clone();
-    //             let state = app_handle.state::<AppState>();
-    //             loop {
-    //                 let proc_lock = state.proc.lock().await;
-    //                 let Some(ref proc) = *proc_lock else {
-    //                     continue;
-    //                 };
-    //                 match proc.get_location() {
-    //                     Ok(loc) => {
-    //                         let _ = ticker_state.tx.send(loc);
-    //                         tokio::time::sleep(Duration::from_millis(500)).await;
-    //                     }
-    //                     Err(e) => {
-    //                         let _ = handle.emit("tracker-error", e);
-    //                         tokio::time::sleep(Duration::from_millis(500)).await;
-    //                     }
-    //                 }
-    //             }
-    //         }))
-    //     }
+        // 4. 메인 이벤트 루프에 종료 신호를 보냄
+        if let Some(tx) = self.shutdown_tx.take() {
+            tx.send(()).ok();
+        }
 
-    //     tokio::select! {
-    //         _ = &mut send_task => recv_task.abort(),
-    //         _ = &mut recv_task => send_task.abort(),
-    //     };
+        // 5. 메인 태스크가 완전히 종료될 때까지 기다림
+        if let Some(handle) = self.handle.take() {
+            handle.await.ok();
+        }
 
-    //     let count = Self::get_and_incr(&state.client_count, -1);
-    //     if count == 1 {
-    //         let mut ticker = state.ticker_handle.lock().unwrap();
-    //         match *ticker {
-    //             Some(ref t) => {
-    //                 t.abort();
-    //                 *ticker = None
-    //             }
-    //             None => {
-    //                 log::error!("Ticker destruction failed: JoinHandle is None")
-    //             }
-    //         }
-    //     }
-
-    //     log::info!("client disconnected: {}", count)
-    // }
-
-    // fn get_and_incr(mutex: &Mutex<i32>, incr: i32) -> i32 {
-    //     let mut m_value = mutex.lock().unwrap();
-    //     let old = *m_value;
-    //     *m_value += incr;
-    //     old
-    // }
+        log::info!("Server has been shut down gracefully.");
+    }
 }
 
 // Our shared state

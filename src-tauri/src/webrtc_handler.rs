@@ -76,10 +76,13 @@ pub async fn local_webrtc_handler(
     let offer = RTCSessionDescription::offer(payload.sdp).unwrap();
 
     let api = APIBuilder::new().build();
-    let pc = api
-        .new_peer_connection(RTCConfiguration::default())
-        .await
-        .unwrap();
+    let pc = Arc::new(
+        api.new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap(),
+    );
+
+    let client_id = uuid::Uuid::new_v4().to_string();
 
     // 1. ICE 수집 완료를 기다리기 위한 채널 생성
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -91,24 +94,6 @@ pub async fn local_webrtc_handler(
         Box::pin(async {})
     }));
 
-    pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
-        log::info!("✅ New DataChannel '{}' from client.", dc.label());
-
-        let state_clone = state.clone();
-        let dc_clone = Arc::clone(&dc);
-        dc.on_open(Box::new(move || {
-            log::info!("✅ Data channel '{}' open.", dc_clone.label());
-            neoserver::setup_data_channel_lifecycle(
-                dc_clone,
-                state_clone,
-                String::from("localhost"),
-            );
-            Box::pin(async {})
-        }));
-
-        Box::pin(async {})
-    }));
-    // let dc = pc.create_data_channel("data", None).await.unwrap();
 
     // 2. 받은 Offer 설정 후 Answer 생성
     pc.set_remote_description(offer).await.unwrap();
@@ -126,6 +111,10 @@ pub async fn local_webrtc_handler(
 
     // 4. 모든 정보가 담긴 완전한 Answer SDP를 가져와서 응답
     let local_desc = pc.local_description().await.unwrap();
+
+    // 목록에 피어 저장 및 dc 설정
+    neoserver::setup_peer_connection_lifecycle(state.clone(), pc.clone(), client_id.clone()).await;
+    
     Json(WebRtcResponse {
         sdp_type: String::from("answer"),
         sdp: local_desc.sdp,

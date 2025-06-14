@@ -1,6 +1,7 @@
 use anyhow::Result;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 use tauri::Manager;
@@ -16,15 +17,11 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
-use crate::types::{AxumState, PlayerInfo};
+use crate::types::{AxumState, Peers, PlayerInfo, WsSender};
 use crate::{
     types::{Payload, SignalingMessage},
     AppState,
 };
-
-// 타입 별칭으로 코드 가독성 향상
-type WsSender = Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>>>;
-type Peers = Arc<Mutex<HashMap<String, Arc<RTCPeerConnection>>>>;
 
 pub async fn run_webrtc_peer_logic(state: Arc<AxumState>, mut shutdown_rx: oneshot::Receiver<()>) {
     // 1. 룸 코드 생성 및 UI로 전송
@@ -287,6 +284,59 @@ fn stop_ticker_if_needed(state: Arc<AxumState>) {
             log::info!("Ticker task aborted.");
         }
     });
+}
+
+pub async fn setup_peer_connection_lifecycle(
+    state: Arc<AxumState>,
+    pc: Arc<RTCPeerConnection>,
+    client_id: String,
+) {
+    let client_id_clone = client_id.clone();
+    let peers_clone = state.peers.clone();
+    pc.on_peer_connection_state_change(Box::new(move |connection_state: RTCPeerConnectionState| {
+        log::info!(
+            "Connection State for peer '{}' has changed: {}",
+            client_id_clone,
+            connection_state
+        );
+
+        // 연결이 끊기거나 실패하면, 공유 상태의 피어 목록에서 자신을 제거합니다.
+        if connection_state == RTCPeerConnectionState::Failed
+            || connection_state == RTCPeerConnectionState::Closed
+            || connection_state == RTCPeerConnectionState::Disconnected
+        {
+            let peers = Arc::clone(&peers_clone);
+            let client_id_clone2 = client_id_clone.clone();
+            tokio::spawn(async move {
+                log::info!("Removing peer '{}' from state.", client_id_clone2);
+                peers.lock().await.remove(&client_id_clone2);
+            });
+        }
+        Box::pin(async {})
+    }));
+
+    let state_clone = state.clone();
+    let client_id_clone = client_id.clone();
+    pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+        log::info!("✅ New DataChannel '{}' from client.", dc.label());
+
+        let state_clone_dc = state_clone.clone();
+        let dc_clone = Arc::clone(&dc);
+        let client_id_dc = client_id_clone.clone();
+        dc.on_open(Box::new(move || {
+            log::info!("✅ Data channel '{}' open.", dc_clone.label());
+            setup_data_channel_lifecycle(
+                dc_clone,
+                state_clone_dc,
+                String::from(client_id_dc),
+            );
+            Box::pin(async {})
+        }));
+
+        Box::pin(async {})
+    }));
+
+    state.peers.lock().await.insert(client_id, pc.clone());
 }
 
 pub fn setup_data_channel_lifecycle(

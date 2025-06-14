@@ -1,11 +1,14 @@
-use std::
-    sync::{atomic::AtomicUsize, Arc}
+use std::{collections::HashMap, 
+    sync::{atomic::AtomicUsize, Arc}}
 ;
+use futures::stream::SplitSink;
 use tauri::AppHandle;
 use tokio::{
-    sync::{broadcast, Mutex},
-    task::JoinHandle,
+    net::TcpStream, sync::{broadcast, Mutex}, task::JoinHandle
 };
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+use webrtc::peer_connection::RTCPeerConnection;
 
 
 #[repr(C)]
@@ -111,6 +114,7 @@ pub struct AxumState {
     // Channel used to send messages to all connected clients.
     pub tx: broadcast::Sender<PlayerInfo>,
     pub ticker_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    pub peers: Peers,
 }
 
 #[derive(serde::Deserialize)]
@@ -125,3 +129,7 @@ pub struct WebRtcResponse {
     pub sdp_type: String,
     pub sdp: String,
 }
+
+// 타입 별칭으로 코드 가독성 향상
+pub type WsSender = Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>>>;
+pub type Peers = Arc<Mutex<HashMap<String, Arc<RTCPeerConnection>>>>;

@@ -10,9 +10,7 @@ use std::sync::Arc;
 use external::WinProc;
 use server::ServerManager;
 use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
+    menu::{Menu, MenuItem}, tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}, AppHandle, Manager, State, WindowEvent
 };
 use tokio::sync::Mutex;
 use types::{GlobalState, LocalStorageConfig, PlayerInfo};
@@ -147,10 +145,11 @@ pub async fn run() {
                 .set_focus();
         }));
     }
-    builder
+    let server_manager =  Arc::new(Mutex::new(ServerManager::default()));
+    let app = builder
         .manage(AppState {
             proc: Mutex::new(None),
-            server_manager: Arc::new(Mutex::new(ServerManager::default())),
+            server_manager: server_manager.clone(),
             global_state: Arc::new(Mutex::new(GlobalState::default())),
         })
         .plugin(tauri_plugin_dialog::init())
@@ -230,6 +229,17 @@ pub async fn run() {
             channel_get_global_state,
             channel_set_global_state,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run_return(|_app_handle, _event| {});
+
+    // 3. 앱이 닫히고 나면, 제어권이 여기로 돌아옵니다.
+    //    이제 여기서 비동기 종료 로직을 깔끔하게 '기다릴' 수 있습니다.
+    println!("Tauri app window closed. Starting final cleanup...");
+    
+    // 복제해 두었던 Arc를 사용하여 shutdown을 호출합니다.
+    server_manager.lock().await.shutdown().await;
+    
+    println!("Cleanup complete. Exiting process.");
 }
