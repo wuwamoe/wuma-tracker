@@ -1,3 +1,10 @@
+use std::sync::Arc;
+use thiserror::Error;
+use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::RTCPeerConnection;
+
 #[repr(C)]
 #[derive(Copy, Clone, serde::Serialize)]
 pub struct FVector {
@@ -42,6 +49,48 @@ pub struct LocalStorageConfig {
     pub auto_attach_enabled: Option<bool>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[serde(tag = "type", content = "data")]
+#[serde(rename_all = "kebab-case")]
+pub enum RtcSignal {
+    Answer(RTCSessionDescription),
+    Offer(RTCSessionDescription),
+    IceCandidate(RTCIceCandidateInit),
+    NewPeer,
+    PeerLeft,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct SignalPacket {
+    pub from: String,
+    pub to: String,
+    pub msg: RtcSignal,
+}
+
+#[derive(Error, Debug)]
+pub enum NativeError {
+    #[error("프로세스가 종료되었습니다.")]
+    ProcessTerminated,
+
+    #[error("포인터 체인 탐색 실패: {message}")]
+    PointerChainError { message: String },
+
+    #[error("값 읽기 실패: {message}")]
+    ValueReadError { message: String },
+}
+
+pub enum CollectorMessage {
+    Data(PlayerInfo),
+    TemporalError(String),
+    Terminated,
+}
+
+// 한 명의 클라이언트에 대한 모든 WebRTC 관련 리소스를 묶는 구조체
+pub struct Peer {
+    pub connection: Arc<RTCPeerConnection>,
+    pub data_channel: Arc<RTCDataChannel>,
+}
+
 impl Default for LocalStorageConfig {
     fn default() -> LocalStorageConfig {
         LocalStorageConfig {
@@ -66,7 +115,9 @@ impl Default for GlobalState {
         GlobalState {
             proc_state: 0,
             server_state: 0,
-            connection_url: None
+            connection_url: None,
         }
     }
 }
+
+pub const SERVER_ID: &str = "SERVER";

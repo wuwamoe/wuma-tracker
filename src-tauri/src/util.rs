@@ -6,7 +6,7 @@ use tokio::fs::{create_dir_all, read_to_string, write};
 
 use crate::{
     types::{GlobalState, LocalStorageConfig},
-    AppState,
+    TauriState,
 };
 
 pub async fn get_config(app_handle: AppHandle) -> Result<LocalStorageConfig> {
@@ -40,14 +40,14 @@ async fn get_config_file(app_handle: AppHandle) -> Result<PathBuf> {
 }
 
 pub async fn get_global_state(app_handle: AppHandle) -> Result<GlobalState> {
-    let app_state = app_handle.state::<AppState>();
+    let app_state = app_handle.state::<TauriState>();
     let global_state_lock = app_state.global_state.lock().await;
     let global_state = global_state_lock.clone();
-    return Ok(global_state);
+    Ok(global_state)
 }
 
 pub async fn set_global_state(app_handle: AppHandle, value: GlobalState) -> Result<()> {
-    let app_state = app_handle.state::<AppState>();
+    let app_state = app_handle.state::<TauriState>();
     let mut guard = app_state.global_state.lock().await;
     if guard.clone() == value {
         return Ok(());
@@ -58,14 +58,14 @@ pub async fn set_global_state(app_handle: AppHandle, value: GlobalState) -> Resu
         .emit("handle-global-state-change", value)
         .context("Failed to emit event on global state change");
 
-    return Ok(());
+    Ok(())
 }
 
 pub async fn mutate_global_state(
     app_handle: AppHandle,
     mutation: impl Fn(GlobalState) -> GlobalState,
 ) -> Result<()> {
-    let app_state = app_handle.state::<AppState>();
+    let app_state = app_handle.state::<TauriState>();
     let mut guard = app_state.global_state.lock().await;
     let new_value = mutation(guard.clone());
     if guard.clone() == new_value {
@@ -77,5 +77,5 @@ pub async fn mutate_global_state(
         .emit("handle-global-state-change", new_value)
         .context("Failed to emit event on global state change");
 
-    return Ok(());
+    Ok(())
 }

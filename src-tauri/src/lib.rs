@@ -1,65 +1,38 @@
-mod external;
+mod native_collector;
 mod offsets;
-mod server;
+mod peer_manager;
+mod rtc_supervisor;
+mod signaling_handler;
 mod types;
 mod util;
+mod win_proc;
 use std::sync::Arc;
 
-use external::WinProc;
-use server::ServerManager;
+use crate::rtc_supervisor::RtcSupervisor;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent,
 };
-use tokio::sync::Mutex;
-use types::{GlobalState, LocalStorageConfig, PlayerInfo};
+use tokio::sync::{oneshot, Mutex};
+use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
 
-struct AppState {
-    proc: Mutex<Option<WinProc>>,
-    server_manager: Arc<Mutex<ServerManager>>,
+struct TauriState {
+    rtc_supervisor: Arc<Mutex<RtcSupervisor>>,
     global_state: Arc<Mutex<GlobalState>>,
 }
 
 #[tauri::command]
 async fn find_and_attach(app_handle: AppHandle) -> Result<(), String> {
-    let Ok(mut win_proc) = WinProc::from_name("Client-Win64-Shipping.exe") else {
-        let _ = util::mutate_global_state(app_handle, |old| GlobalState {
-            proc_state: 0,
-            ..old
-        })
-        .await;
-        return Err(String::from("게임이 실행 중이 아닙니다."));
-    };
-
-    if !win_proc.init() {
-        let _ = util::mutate_global_state(app_handle, |old| GlobalState {
-            proc_state: 0,
-            ..old
-        })
-        .await;
-        return Err(String::from("게임에 연결하지 못했습니다."));
-    }
-    let state = app_handle.state::<AppState>();
-    *state.proc.lock().await = Some(win_proc);
-    let _ = util::mutate_global_state(app_handle, |old| GlobalState {
-        proc_state: 1,
-        ..old
-    })
-    .await;
+    let state = app_handle.state::<TauriState>();
+    state
+        .rtc_supervisor
+        .lock()
+        .await
+        .attach_process(app_handle.clone(), "Client-Win64-Shipping.exe")
+        .await?;
     Ok(())
-}
-
-// remember to call `.manage(MyState::default())`
-#[tauri::command]
-async fn get_location(state: tauri::State<'_, AppState>) -> Result<PlayerInfo, String> {
-    // let state = state.clone();
-    let proc_lock = state.proc.lock().await;
-    let Some(ref proc) = *proc_lock else {
-        return Err(String::from("Process not initialized"));
-    };
-    return proc.get_location();
 }
 
 #[tauri::command]
@@ -76,7 +49,7 @@ async fn write_config(
             ip,
             port,
             use_secure_connection,
-            auto_attach_enabled
+            auto_attach_enabled,
         },
     )
     .await
@@ -88,48 +61,47 @@ async fn write_config(
 
 #[tauri::command]
 async fn restart_server(app_handle: AppHandle) -> Result<(), String> {
-    restart_server_impl(app_handle).await;
-    Ok(())
+    restart_server_impl(app_handle).await
 }
 
 #[tauri::command]
 async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
-    match util::get_config(app_handle).await {
-        Ok(config) => return Ok(config),
-        Err(e) => return Err(e.to_string()),
-    }
+    return match get_config(app_handle).await {
+        Ok(config) => Ok(config),
+        Err(e) => Err(e.to_string()),
+    };
 }
 
 #[tauri::command]
 async fn channel_get_global_state(app_handle: AppHandle) -> Result<GlobalState, String> {
-    match util::get_global_state(app_handle).await {
-        Ok(gs) => return Ok(gs),
-        Err(e) => return Err(e.to_string()),
-    }
+    return match util::get_global_state(app_handle).await {
+        Ok(gs) => Ok(gs),
+        Err(e) => Err(e.to_string()),
+    };
 }
 
 #[tauri::command]
 async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> Result<(), String> {
-    match util::set_global_state(app_handle, value).await {
-        Ok(_) => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    }
+    return match util::set_global_state(app_handle, value).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    };
 }
 
-async fn restart_server_impl(app_handle: AppHandle) {
+async fn restart_server_impl(app_handle: AppHandle) -> Result<(), String> {
     let config = get_config(app_handle.clone()).await.unwrap_or_default();
     app_handle
         .clone()
-        .state::<AppState>()
-        .server_manager
+        .state::<TauriState>()
+        .rtc_supervisor
         .lock()
         .await
-        .restart(
-            app_handle,
+        .restart_local_signaling_server(
+            app_handle.clone(),
             config.ip.unwrap_or(String::from("0.0.0.0")),
             config.port.unwrap_or(46821),
         )
-        .await;
+        .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -145,10 +117,11 @@ pub async fn run() {
                 .set_focus();
         }));
     }
+    let rtc_supervisor = Arc::new(Mutex::new(RtcSupervisor::new()));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     builder
-        .manage(AppState {
-            proc: Mutex::new(None),
-            server_manager: Arc::new(Mutex::new(ServerManager::default())),
+        .manage(TauriState {
+            rtc_supervisor: rtc_supervisor.clone(),
             global_state: Arc::new(Mutex::new(GlobalState::default())),
         })
         .plugin(tauri_plugin_dialog::init())
@@ -170,10 +143,9 @@ pub async fn run() {
                 .icon(app.default_window_icon().unwrap().clone())
                 .on_menu_event(|app, event| {
                     let window = app.get_webview_window("main").unwrap();
-
                     match event.id.as_ref() {
                         "quit" => {
-                            std::process::exit(0);
+                            app.exit(0);
                         }
                         "show" => {
                             window.show().unwrap();
@@ -211,23 +183,34 @@ pub async fn run() {
             }
 
             let handle = app.handle().clone();
-            tokio::spawn(async move { restart_server_impl(handle).await });
-
-            // Actix 서버를 setup 단계에서 비동기적으로 시작
-            // tokio::spawn(async move {
-            //     tokio_init(app_handle).await;
-            // });
+            tokio::spawn(async move {
+                let config = get_config(handle.clone()).await.unwrap_or_default();
+                rtc_supervisor
+                    .lock()
+                    .await
+                    .run(
+                        handle,
+                        config.ip.unwrap_or(String::from("0.0.0.0")),
+                        config.port.unwrap_or(46821),
+                        shutdown_rx,
+                    )
+                    .await
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             find_and_attach,
-            get_location,
             write_config,
             restart_server,
             channel_get_config,
             channel_get_global_state,
             channel_set_global_state,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        // .run()
+        .expect("error while building tauri application");
+
+    println!("Tauri app window closed. Starting final cleanup...");
+    let _ = shutdown_tx.send(());
+    println!("Cleanup complete. Exiting process.");
 }

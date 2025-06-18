@@ -125,7 +125,7 @@
       },
     );
     // 트래커 오류 리스너
-    const unlistenError = listen<string>('tracker-error', (e) => {
+    const unlistenError = listen<string>('handle-tracker-error', (e) => {
       trackerError = e.payload;
     });
     const unlistenServerState = listen<GlobalState>(
