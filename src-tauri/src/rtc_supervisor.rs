@@ -1,7 +1,7 @@
 use crate::native_collector::{collection_loop, NativeCollector};
 use crate::peer_manager::PeerManager; // 이전 코드에서 정의
 use crate::signaling_handler::SignalingHandler;
-use crate::types::{CollectorMessage, GlobalState, RtcSignal, SignalPacket};
+use crate::types::{CollectorMessage, GlobalState, RtcSignal, SignalPacket, SupervisorCommand};
 use crate::util;
 use anyhow::Result;
 use std::sync::Arc;
@@ -65,6 +65,7 @@ impl RtcSupervisor {
         app_handle: AppHandle,
         ip: String,
         port: u16,
+        mut command_rx: mpsc::Receiver<SupervisorCommand>,
         mut shutdown_signal: oneshot::Receiver<()>,
     ) -> Result<(), String> {
         log::info!("Starting RtcSupervisor...");
@@ -138,6 +139,26 @@ impl RtcSupervisor {
                         }
                     }
                 }
+
+                Some(command) = command_rx.recv() => {
+                    // log::info!("Supervisor received command: {:?}", command);
+                    match command {
+                        SupervisorCommand::AttachProcess(proc_name, responder) => {
+                            let result = self.attach_process(app_handle.clone(), &proc_name).await;
+                            let _ = responder.send(result);
+                        }
+                        SupervisorCommand::RestartSignalingServer => {
+                            let config = util::get_config(app_handle.clone()).await.unwrap_or_default();
+                            if let Err(e) = self.restart_local_signaling_server(
+                                app_handle.clone(),
+                                config.ip.unwrap_or(String::from("0.0.0.0")),
+                                config.port.unwrap_or(46821),
+                            ).await {
+                                log::error!("Restart local signaling server failed: {}", e);
+                            };
+                        }
+                    }
+                }
             }
         }
 
@@ -169,7 +190,7 @@ impl RtcSupervisor {
             return Ok(());
         }
 
-        log::info!("Attempting to attach to process: {}", proc_name);
+        // log::info!("Attempting to attach to process: {}", proc_name);
         match NativeCollector::new(proc_name).await {
             Ok(collector) => {
                 *self.collector_state.instance.lock().await = Some(collector);
@@ -184,7 +205,7 @@ impl RtcSupervisor {
                 Ok(())
             }
             Err(e) => {
-                log::error!("Failed to attach to process: {}", e);
+                // log::error!("Failed to attach to process: {}", e);
                 Err(e.to_string())
             }
         }

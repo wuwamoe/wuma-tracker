@@ -38,6 +38,7 @@ webrtc = "0.13.0"
 thiserror = "1.0"
 tokio-tungstenite = { version = "0.27.0", features = ["native-tls"] }
 uuid = { version = "1.16.0", features = ["v4"] }
+tower-http = { version = "0.6.6", features = ["cors"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.2.4"

@@ -1,4 +1,4 @@
-use crate::types::{CollectorMessage, NativeError, PlayerInfo};
+use crate::types::{CollectorMessage, NativeError};
 use crate::win_proc::WinProc;
 use anyhow::Result;
 use std::sync::Arc;

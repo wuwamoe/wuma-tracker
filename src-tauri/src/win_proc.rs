@@ -1,9 +1,14 @@
-use std::{
-    ffi::{CStr, CString},
-    mem,
-    ptr::null_mut,
-};
+use std::{ffi::CStr, mem, ptr::null_mut};
 
+use crate::types::NativeError;
+use crate::types::NativeError::{PointerChainError, ValueReadError};
+use crate::{
+    offsets::WuwaOffset,
+    types::{FIntVector, PlayerInfo},
+};
+use anyhow::{bail, Context, Result};
+use winapi::um::minwinbase::STILL_ACTIVE;
+use winapi::um::processthreadsapi::GetExitCodeProcess;
 use winapi::{
     ctypes::c_void,
     shared::minwindef::{DWORD, HMODULE},
@@ -19,15 +24,6 @@ use winapi::{
         winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
     },
 };
-use winapi::um::minwinbase::STILL_ACTIVE;
-use winapi::um::processthreadsapi::GetExitCodeProcess;
-use crate::{
-    offsets::WuwaOffset,
-    types::{FIntVector, PlayerInfo},
-};
-use anyhow::{bail, Context, Result};
-use crate::types::NativeError;
-use crate::types::NativeError::{PointerChainError, ValueReadError};
 
 pub struct WinProc {
     pid: u32,
@@ -119,7 +115,10 @@ impl WinProc {
         let targets = [
             ("GWorld", Self::OFFSET.global_gworld),
             ("OwningGameInstance", Self::OFFSET.uworld_owninggameinstance),
-            ("TArray<*LocalPlayers>", Self::OFFSET.ugameinstance_localplayers),
+            (
+                "TArray<*LocalPlayers>",
+                Self::OFFSET.ugameinstance_localplayers,
+            ),
             ("LocalPlayer", 0),
             ("PlayerController", Self::OFFSET.uplayer_playercontroller),
             ("APawn", Self::OFFSET.aplayercontroller_acknowlegedpawn),
@@ -129,16 +128,21 @@ impl WinProc {
         let mut last_addr = self.base_addr;
         for t in targets {
             let target = last_addr + t.1;
-            last_addr = self.read_memory::<u64>(target)
+            last_addr = self
+                .read_memory::<u64>(target)
                 .ok_or_else(|| PointerChainError {
-                    message: format!("'{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target)
+                    message: format!("'{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target),
                 })?;
         }
 
         let target = last_addr + Self::OFFSET.uscenecomponent_relativelocation;
-        let location = self.read_memory::<PlayerInfo>(target)
+        let location = self
+            .read_memory::<PlayerInfo>(target)
             .ok_or_else(|| ValueReadError {
-                message: format!("RelativeLocation 위치 ({:X})의 값을 읽지 못했습니다.", target),
+                message: format!(
+                    "RelativeLocation 위치 ({:X})의 값을 읽지 못했습니다.",
+                    target
+                ),
             })?;
 
         let target_worldorigin = [
@@ -149,17 +153,25 @@ impl WinProc {
         last_addr = self.base_addr;
         for t in target_worldorigin {
             let target = last_addr + t.1;
-            last_addr = self.read_memory::<u64>(target)
+            last_addr = self
+                .read_memory::<u64>(target)
                 .ok_or_else(|| PointerChainError {
-                    message: format!("WorldOrigin을 위한 '{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target)
+                    message: format!(
+                        "WorldOrigin을 위한 '{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.",
+                        t.0, target
+                    ),
                 })?;
         }
 
         let target = last_addr + Self::OFFSET.ulevel_lastworldorigin;
-        let root_location = self.read_memory::<FIntVector>(target)
-            .ok_or_else(|| ValueReadError {
-                message: format!("LastWorldOrigin 위치 ({:X})의 값을 읽지 못했습니다.", target),
-            })?;
+        let root_location =
+            self.read_memory::<FIntVector>(target)
+                .ok_or_else(|| ValueReadError {
+                    message: format!(
+                        "LastWorldOrigin 위치 ({:X})의 값을 읽지 못했습니다.",
+                        target
+                    ),
+                })?;
 
         Ok(PlayerInfo {
             x: location.x + (root_location.x as f32),

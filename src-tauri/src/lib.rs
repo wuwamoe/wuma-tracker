@@ -9,30 +9,39 @@ mod win_proc;
 use std::sync::Arc;
 
 use crate::rtc_supervisor::RtcSupervisor;
+use crate::types::SupervisorCommand;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent,
 };
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
 
 struct TauriState {
-    rtc_supervisor: Arc<Mutex<RtcSupervisor>>,
+    supervisor_tx: mpsc::Sender<SupervisorCommand>,
     global_state: Arc<Mutex<GlobalState>>,
 }
 
 #[tauri::command]
 async fn find_and_attach(app_handle: AppHandle) -> Result<(), String> {
     let state = app_handle.state::<TauriState>();
+    let (resp_tx, resp_rx) = oneshot::channel();
     state
-        .rtc_supervisor
-        .lock()
+        .supervisor_tx
+        .send(SupervisorCommand::AttachProcess(
+            "Client-Win64-Shipping.exe".to_string(),
+            resp_tx,
+        ))
         .await
-        .attach_process(app_handle.clone(), "Client-Win64-Shipping.exe")
-        .await?;
-    Ok(())
+        .map_err(|e| format!("앱 내부 오류: {}", e))?;
+    
+    match resp_rx.await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("앱 내부 오류: {}", e)),
+    }
 }
 
 #[tauri::command]
@@ -89,19 +98,13 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
 }
 
 async fn restart_server_impl(app_handle: AppHandle) -> Result<(), String> {
-    let config = get_config(app_handle.clone()).await.unwrap_or_default();
+    // let config = get_config(app_handle.clone()).await.unwrap_or_default();
     app_handle
-        .clone()
         .state::<TauriState>()
-        .rtc_supervisor
-        .lock()
+        .supervisor_tx
+        .send(SupervisorCommand::RestartSignalingServer)
         .await
-        .restart_local_signaling_server(
-            app_handle.clone(),
-            config.ip.unwrap_or(String::from("0.0.0.0")),
-            config.port.unwrap_or(46821),
-        )
-        .await
+        .map_err(|e| format!("재시작 실패: {}", e))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -117,11 +120,12 @@ pub async fn run() {
                 .set_focus();
         }));
     }
-    let rtc_supervisor = Arc::new(Mutex::new(RtcSupervisor::new()));
+    let mut rtc_supervisor = RtcSupervisor::new();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    builder
+    let (supervisor_tx, supervisor_rx) = mpsc::channel(32);
+    let app = builder
         .manage(TauriState {
-            rtc_supervisor: rtc_supervisor.clone(),
+            supervisor_tx,
             global_state: Arc::new(Mutex::new(GlobalState::default())),
         })
         .plugin(tauri_plugin_dialog::init())
@@ -186,12 +190,11 @@ pub async fn run() {
             tokio::spawn(async move {
                 let config = get_config(handle.clone()).await.unwrap_or_default();
                 rtc_supervisor
-                    .lock()
-                    .await
                     .run(
                         handle,
                         config.ip.unwrap_or(String::from("0.0.0.0")),
                         config.port.unwrap_or(46821),
+                        supervisor_rx,
                         shutdown_rx,
                     )
                     .await
@@ -207,8 +210,9 @@ pub async fn run() {
             channel_set_global_state,
         ])
         .build(tauri::generate_context!())
-        // .run()
         .expect("error while building tauri application");
+
+    app.run_return(|_app_handle, _event| {});
 
     println!("Tauri app window closed. Starting final cleanup...");
     let _ = shutdown_tx.send(());

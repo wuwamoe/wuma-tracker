@@ -1,6 +1,6 @@
 use crate::types::{GlobalState, RtcSignal, SignalPacket, SERVER_ID};
 use crate::util;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::{mpsc, oneshot, Mutex};
+use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 pub(crate) struct SignalingHandler {
@@ -86,6 +87,10 @@ impl SignalingHandler {
     }
 
     async fn start_localhost_server(&mut self, ip: String, port: u16) -> Result<String, String> {
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
         let listener = tokio::net::TcpListener::bind(&format!("{}:{}", ip, port))
             .await
             .map_err(|e| format!("통신 서버 시작 실패: {}", e).to_string())?;
@@ -100,7 +105,7 @@ impl SignalingHandler {
             .with_state(Arc::new(LocalAxumState {
                 sh_pm_tx: self.sh_pm_tx.clone(),
                 connections: self.connections.clone(),
-            }));
+            })).layer(cors);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         self.localhost_server_shutdown_tx = Some(shutdown_tx);
 
@@ -122,11 +127,11 @@ impl SignalingHandler {
             tokio::spawn(async move {
                 while let Some(command) = rx.recv().await {
                     let id = command.to;
-                    match (serde_json::to_string(&command.msg)) {
-                        Ok(msgStr) => {
+                    match serde_json::to_string(&command.msg) {
+                        Ok(msg_str) => {
                             let connections_locked = connections.lock().await;
                             if let Some(sender) = connections_locked.get(&id) {
-                                if let Err(e) = sender.send(msgStr).await {
+                                if let Err(e) = sender.send(msg_str).await {
                                     log::error!("[{}] Failed to forward message: {}", id, e);
                                 }
                             } else {

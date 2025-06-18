@@ -4,6 +4,8 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use anyhow::Result;
+use tokio::sync::oneshot;
 
 #[repr(C)]
 #[derive(Copy, Clone, serde::Serialize)]
@@ -83,6 +85,12 @@ pub enum CollectorMessage {
     Data(PlayerInfo),
     TemporalError(String),
     Terminated,
+}
+
+#[derive(Debug)]
+pub enum SupervisorCommand {
+    AttachProcess(String, oneshot::Sender<Result<(), String>>),
+    RestartSignalingServer,
 }
 
 // 한 명의 클라이언트에 대한 모든 WebRTC 관련 리소스를 묶는 구조체

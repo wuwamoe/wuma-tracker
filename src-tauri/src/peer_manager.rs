@@ -1,9 +1,8 @@
-use crate::native_collector::{collection_loop, NativeCollector};
-use crate::types::{CollectorMessage, Peer, PlayerInfo, RtcSignal, SignalPacket, SERVER_ID};
+use crate::types::{Peer, PlayerInfo, RtcSignal, SignalPacket, SERVER_ID};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Bytes;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
@@ -134,13 +133,14 @@ impl PeerManager {
     }
 
     pub async fn broadcast_data(&self, message: &PlayerInfo) -> Result<()> {
-        let bytes = serde_json::to_vec(&message)
+        log::info!("Broadcast data: {}", serde_json::to_string(message)?);
+        let payload = serde_json::to_string(message)
             .context("DataChannel send error: could not serialize data")?;
-        let payload: Bytes = bytes.into();
 
         for (client_id, peer) in &self.peers {
+            log::info!("[{}] Sending data to peer: {}", client_id, peer.connection);
             if peer.data_channel.ready_state() == RTCDataChannelState::Open {
-                if let Err(e) = peer.data_channel.send(&payload).await {
+                if let Err(e) = peer.data_channel.send_text(&payload).await {
                     log::warn!(
                         "[{}] DataChannel send error, but continuing broadcast: {}",
                         client_id,
