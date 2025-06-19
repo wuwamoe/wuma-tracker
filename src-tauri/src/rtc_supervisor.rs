@@ -1,12 +1,13 @@
-use crate::native_collector::{collection_loop, NativeCollector};
+use crate::native_collector::{NativeCollector, collection_loop};
 use crate::peer_manager::PeerManager; // 이전 코드에서 정의
+use crate::room_code_generator::generate_room_code_base36;
 use crate::signaling_handler::SignalingHandler;
 use crate::types::{CollectorMessage, GlobalState, RtcSignal, SignalPacket, SupervisorCommand};
 use crate::util;
 use anyhow::Result;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 struct CollectorState {
     instance: Arc<Mutex<Option<NativeCollector>>>,
@@ -72,7 +73,7 @@ impl RtcSupervisor {
 
         // 1. SignalingHandler의 내부 태스크들(웹소켓 서버, 명령 처리기)을 시작시킵니다.
         self.signaling_handler
-            .start(app_handle.clone(), ip, port)
+            .restart_local_server(app_handle.clone(), ip, port)
             .await?;
         log::info!("SignalingHandler started.");
 
@@ -149,13 +150,33 @@ impl RtcSupervisor {
                         }
                         SupervisorCommand::RestartSignalingServer => {
                             let config = util::get_config(app_handle.clone()).await.unwrap_or_default();
-                            if let Err(e) = self.restart_local_signaling_server(
+                            if let Err(e) = self.signaling_handler.restart_local_server(
                                 app_handle.clone(),
                                 config.ip.unwrap_or(String::from("0.0.0.0")),
                                 config.port.unwrap_or(46821),
                             ).await {
                                 log::error!("Restart local signaling server failed: {}", e);
                             };
+                        }
+                        SupervisorCommand::RestartExternalConnection(responder) => {
+                            let code = generate_room_code_base36();
+                            match self.signaling_handler.connect_to_external_server(format!("wss://concourse.wuwa.moe/{}?role=server", code.clone())).await {
+                                Ok(_) => {
+                                    let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                                        external_connection_code: Some(code.clone()),
+                                        ..old
+                                    });
+                                    let _ = responder.send(Ok(code));
+                                }
+                                Err(e) => {
+                                    log::error!("Restart external signaling server failed: {}", e);
+                                    let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                                        external_connection_code: None,
+                                        ..old
+                                    });
+                                    let _ = responder.send(Err(e));
+                                }
+                            }
                         }
                     }
                 }
@@ -164,18 +185,6 @@ impl RtcSupervisor {
 
         Ok(())
     }
-
-    pub async fn restart_local_signaling_server(
-        &mut self,
-        app_handle: AppHandle,
-        ip: String,
-        port: u16,
-    ) -> Result<(), String> {
-        self.signaling_handler
-            .start(app_handle.clone(), ip, port)
-            .await
-    }
-
     // --- Collector 생명주기 메소드 ---
 
     /// 외부에서 프로세스 attach를 명령하기 위한 API

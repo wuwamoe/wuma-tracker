@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use webrtc::data_channel::RTCDataChannel;
@@ -5,7 +6,10 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use anyhow::Result;
-use tokio::sync::oneshot;
+use futures::channel::mpsc as futures_mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
 #[repr(C)]
 #[derive(Copy, Clone, serde::Serialize)]
@@ -91,6 +95,7 @@ pub enum CollectorMessage {
 pub enum SupervisorCommand {
     AttachProcess(String, oneshot::Sender<Result<(), String>>),
     RestartSignalingServer,
+    RestartExternalConnection(oneshot::Sender<Result<String, String>>),
 }
 
 // 한 명의 클라이언트에 대한 모든 WebRTC 관련 리소스를 묶는 구조체
@@ -98,6 +103,21 @@ pub struct Peer {
     pub connection: Arc<RTCPeerConnection>,
     pub data_channel: Arc<RTCDataChannel>,
 }
+
+#[derive(Debug)]
+pub enum WsRouteInfo {
+    External,
+    Local(mpsc::Sender<String>)
+}
+
+#[derive(Debug)]
+pub struct ExternalSession {
+    // command_processor가 사용할 메시지 발신용 채널의 Sender
+    pub ws_sender: futures_mpsc::UnboundedSender<TungsteniteMessage>,
+    // 이 세션의 모든 태스크를 한 번에 종료시키기 위한 핸들
+    pub shutdown_handle: JoinHandle<()>,
+}
+
 
 impl Default for LocalStorageConfig {
     fn default() -> LocalStorageConfig {
@@ -116,6 +136,7 @@ pub struct GlobalState {
     pub proc_state: i32,
     pub server_state: i32,
     pub connection_url: Option<String>,
+    pub external_connection_code: Option<String>,
 }
 
 impl Default for GlobalState {
@@ -124,6 +145,7 @@ impl Default for GlobalState {
             proc_state: 0,
             server_state: 0,
             connection_url: None,
+            external_connection_code: None,
         }
     }
 }

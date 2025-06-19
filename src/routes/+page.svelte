@@ -108,6 +108,11 @@
       .catch((err) => {
         console.error('전역 상태 동기화 실패:', err);
       });
+      
+    invoke<string>('restart_external_signaling_client')
+      .catch((err) => {
+        console.error('외부 연결 실패:', err);
+      });
 
     // 앱 버전 가져오기
     getVersion()

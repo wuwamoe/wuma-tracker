@@ -6,6 +6,8 @@ mod signaling_handler;
 mod types;
 mod util;
 mod win_proc;
+mod room_code_generator;
+
 use std::sync::Arc;
 
 use crate::rtc_supervisor::RtcSupervisor;
@@ -70,8 +72,31 @@ async fn write_config(
 
 #[tauri::command]
 async fn restart_server(app_handle: AppHandle) -> Result<(), String> {
-    restart_server_impl(app_handle).await
+    app_handle
+        .state::<TauriState>()
+        .supervisor_tx
+        .send(SupervisorCommand::RestartSignalingServer)
+        .await
+        .map_err(|e| format!("재시작 실패: {}", e))
 }
+
+#[tauri::command]
+async fn restart_external_signaling_client(app_handle: AppHandle) -> Result<String, String> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    app_handle
+        .state::<TauriState>()
+        .supervisor_tx
+        .send(SupervisorCommand::RestartExternalConnection(resp_tx))
+        .await
+        .map_err(|e| format!("앱 내부 오류: {}", e))?;
+
+    match resp_rx.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("앱 내부 오류: {}", e)),
+    }
+}
+
 
 #[tauri::command]
 async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
@@ -95,16 +120,6 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
         Ok(_) => Ok(()),
         Err(e) => Err(e.to_string()),
     };
-}
-
-async fn restart_server_impl(app_handle: AppHandle) -> Result<(), String> {
-    // let config = get_config(app_handle.clone()).await.unwrap_or_default();
-    app_handle
-        .state::<TauriState>()
-        .supervisor_tx
-        .send(SupervisorCommand::RestartSignalingServer)
-        .await
-        .map_err(|e| format!("재시작 실패: {}", e))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -205,6 +220,7 @@ pub async fn run() {
             find_and_attach,
             write_config,
             restart_server,
+            restart_external_signaling_client,
             channel_get_config,
             channel_get_global_state,
             channel_set_global_state,

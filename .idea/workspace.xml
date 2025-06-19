@@ -12,19 +12,16 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="302e6ba0-0c9e-4a22-b227-2d1590b91c60" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/wuma-helper.iml" beforeDir="false" />
+      <change afterPath="$PROJECT_DIR$/src-tauri/src/room_code_generator.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/Cargo.lock" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/Cargo.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/lib.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src-tauri/src/native_collector.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/native_collector.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/src/peer_manager.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/peer_manager.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/src/rtc_supervisor.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/rtc_supervisor.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/src/signaling_handler.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/signaling_handler.rs" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src-tauri/src/types.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/types.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src-tauri/src/win_proc.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src-tauri/src/win_proc.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/routes/+page.svelte" beforeDir="false" afterPath="$PROJECT_DIR$/src/routes/+page.svelte" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -74,7 +71,7 @@
     &quot;org.rust.cargo.project.model.PROJECT_DISCOVERY&quot;: &quot;true&quot;,
     &quot;org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon&quot;: &quot;&quot;,
     &quot;org.rust.first.attach.projects&quot;: &quot;true&quot;,
-    &quot;prettierjs.PrettierConfiguration.Package&quot;: &quot;X:\\wuma-helper\\node_modules\\prettier&quot;,
+    &quot;prettierjs.PrettierConfiguration.Package&quot;: &quot;D:\\NewGit\\wuma-helper\\node_modules\\prettier&quot;,
     &quot;settings.editor.selected.configurable&quot;: &quot;language.rust.cargo.check&quot;,
     &quot;ts.external.directory.path&quot;: &quot;X:\\wuma-helper\\node_modules\\typescript\\lib&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
@@ -103,6 +100,8 @@
       <workItem from="1750264409888" duration="48000" />
       <workItem from="1750264480224" duration="397000" />
       <workItem from="1750264891003" duration="862000" />
+      <workItem from="1750339494205" duration="678000" />
+      <workItem from="1750343239560" duration="9362000" />
     </task>
     <servers />
   </component>

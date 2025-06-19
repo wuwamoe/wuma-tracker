@@ -3,7 +3,7 @@ name = "wuma-tracker"
 version = "1.0.5"
 description = "명조 맵스 트래커"
 authors = ["wumadevs"]
-edition = "2021"
+edition = "2024"
 license = "GPL-3.0-only"
 license-file = "LICENSE"
 
@@ -35,12 +35,13 @@ log = "0.4.22"
 tauri-plugin-dialog = "2.2.2"
 anyhow = "1.0.96"
 webrtc = "0.13.0"
-thiserror = "1.0"
+thiserror = "1"
 tokio-tungstenite = { version = "0.27.0", features = ["native-tls"] }
-uuid = { version = "1.16.0", features = ["v4"] }
+uuid = { version = "1.17.0", features = ["v4"] }
 tower-http = { version = "0.6.6", features = ["cors"] }
+rand = "0.8"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.2.4"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.8.1"
 
