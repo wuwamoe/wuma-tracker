@@ -1,5 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
 use ::rand::Rng;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // 8자리 Base36 코드 생성
 const CODE_LENGTH: usize = 8;

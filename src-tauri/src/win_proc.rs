@@ -6,7 +6,7 @@ use crate::{
     offsets::WuwaOffset,
     types::{FIntVector, PlayerInfo},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use winapi::um::minwinbase::STILL_ACTIVE;
 use winapi::um::processthreadsapi::GetExitCodeProcess;
 use winapi::{
@@ -18,7 +18,7 @@ use winapi::{
         processthreadsapi::OpenProcess,
         psapi::{EnumProcessModulesEx, LIST_MODULES_DEFAULT},
         tlhelp32::{
-            CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+            CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
             TH32CS_SNAPPROCESS,
         },
         winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},

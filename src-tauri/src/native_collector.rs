@@ -3,7 +3,7 @@ use crate::win_proc::WinProc;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// 단순 Windows Process Wrapper
 pub struct NativeCollector {

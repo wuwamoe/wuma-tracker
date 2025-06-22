@@ -1,4 +1,4 @@
-use crate::types::{Peer, PlayerInfo, RtcSignal, SignalPacket, SERVER_ID};
+use crate::types::{Peer, PlayerInfo, RtcSignal, SERVER_ID, SignalPacket};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
 pub(crate) struct PeerManager {
@@ -58,7 +59,20 @@ impl PeerManager {
 
     pub async fn handle_new_client(&mut self, client_id: String) -> Result<()> {
         let api = APIBuilder::new().build();
-        let config = RTCConfiguration::default();
+        let config = RTCConfiguration {
+            ice_servers: vec![
+                // 공개 STUN 서버들을 추가합니다.
+                RTCIceServer {
+                    urls: vec!["stun:stun1.l.google.com:19302".to_owned()],
+                    ..Default::default()
+                },
+                RTCIceServer {
+                    urls: vec!["stun:stun.cloudflare.com:3478".to_owned()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
         let pc = Arc::new(api.new_peer_connection(config).await?);
 
         // 1. ICE Candidate 생성을 감지하는 핸들러를 등록합니다.

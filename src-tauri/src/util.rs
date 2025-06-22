@@ -5,8 +5,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::fs::{create_dir_all, read_to_string, write};
 
 use crate::{
-    types::{GlobalState, LocalStorageConfig},
     TauriState,
+    types::{GlobalState, LocalStorageConfig},
 };
 
 pub async fn get_config(app_handle: AppHandle) -> Result<LocalStorageConfig> {

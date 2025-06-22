@@ -1,23 +1,23 @@
 mod native_collector;
 mod offsets;
 mod peer_manager;
+mod room_code_generator;
 mod rtc_supervisor;
 mod signaling_handler;
 mod types;
 mod util;
 mod win_proc;
-mod room_code_generator;
 
 use std::sync::Arc;
 
 use crate::rtc_supervisor::RtcSupervisor;
 use crate::types::SupervisorCommand;
 use tauri::{
+    AppHandle, Manager, WindowEvent,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
 
@@ -38,7 +38,7 @@ async fn find_and_attach(app_handle: AppHandle) -> Result<(), String> {
         ))
         .await
         .map_err(|e| format!("앱 내부 오류: {}", e))?;
-    
+
     match resp_rx.await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(e),
@@ -97,7 +97,6 @@ async fn restart_external_signaling_client(app_handle: AppHandle) -> Result<Stri
     }
 }
 
-
 #[tauri::command]
 async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
     return match get_config(app_handle).await {
@@ -125,7 +124,7 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
-    let mut builder = tauri::Builder::default();
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_clipboard_manager::init());
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

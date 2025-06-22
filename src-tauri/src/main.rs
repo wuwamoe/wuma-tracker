@@ -7,7 +7,7 @@ use winapi::shared::ntdef::NULL;
 use winapi::um::processthreadsapi::OpenProcessToken;
 use winapi::um::securitybaseapi::GetTokenInformation;
 use winapi::um::shellapi::ShellExecuteW;
-use winapi::um::winnt::{TokenElevation, HANDLE, TOKEN_ELEVATION, TOKEN_QUERY};
+use winapi::um::winnt::{HANDLE, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use winapi::um::winuser::SW_SHOWNORMAL;
 
 fn main() {

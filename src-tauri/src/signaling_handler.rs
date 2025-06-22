@@ -1,24 +1,24 @@
-use crate::types::{ExternalSession, GlobalState, RtcSignal, SignalPacket, WsRouteInfo, SERVER_ID};
+use crate::room_code_generator::generate_room_code_base36;
+use crate::types::{ExternalSession, GlobalState, RtcSignal, SERVER_ID, SignalPacket, WsRouteInfo};
 use crate::util;
 use anyhow::Result;
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
+use futures::channel::mpsc as futures_mpsc;
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use std::collections::HashMap;
 use std::string::ToString;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
-use futures::channel::mpsc as futures_mpsc;
-use crate::room_code_generator::generate_room_code_base36;
 
 pub(crate) struct SignalingHandler {
     // Axum 서버 종료를 위한 Sender
@@ -111,7 +111,8 @@ impl SignalingHandler {
             .with_state(Arc::new(LocalAxumState {
                 sh_pm_tx: self.sh_pm_tx.clone(),
                 switching_table: self.switching_table.clone(),
-            })).layer(cors);
+            }))
+            .layer(cors);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         self.localhost_server_shutdown_tx = Some(shutdown_tx);
 
@@ -126,7 +127,7 @@ impl SignalingHandler {
         Ok(addr)
     }
 
-    pub async fn connect_to_external_server(&self, url: String) -> Result<(), String> {
+    pub async fn connect_to_external_server(&self, app_handle: AppHandle, url: String) -> Result<(), String> {
         // 1. 기존에 실행 중인 외부 연결 세션이 있다면 종료시킵니다.
         let mut external_session_guard = self.external_session.lock().await;
         if let Some(old_session) = external_session_guard.take() {
@@ -140,7 +141,10 @@ impl SignalingHandler {
             .await
             .map_err(|e| format!("외부 시그널링 서버 연결 실패: {}", e))?;
 
-        log::info!("Successfully connected to external signaling server: {}", url);
+        log::info!(
+            "Successfully connected to external signaling server: {}",
+            url
+        );
 
         let (ws_sender, mut ws_receiver) = ws_stream.split();
 
@@ -154,32 +158,62 @@ impl SignalingHandler {
         let sh_pm_tx = self.sh_pm_tx.clone();
         let switching_table = self.switching_table.clone();
         let read_task = tokio::spawn(async move {
-            while let Some(Ok(msg)) = ws_receiver.next().await {
-                if let TungsteniteMessage::Text(text) = msg {
-                    if let Ok(packet) = serde_json::from_str::<SignalPacket>(&text) {
-                        let client_id = packet.from.clone();
+            loop {
+                match ws_receiver.next().await {
+                    Some(Ok(msg)) => {
+                        if let TungsteniteMessage::Text(text) = msg {
+                            if let Ok(packet) = serde_json::from_str::<SignalPacket>(&text) {
+                                let client_id = packet.from.clone();
 
-                        // 워커가 보낸 메시지 종류에 따라 라우팅 테이블을 업데이트합니다.
-                        match packet.msg {
-                            RtcSignal::NewPeer => {
-                                log::info!("[External] New peer '{}' registered in routing table.", client_id);
-                                switching_table.lock().await.insert(client_id.clone(), WsRouteInfo::External);
-                            }
-                            RtcSignal::PeerLeft => {
-                                log::info!("[External] Peer '{}' removed from routing table.", client_id);
-                                switching_table.lock().await.remove(&client_id);
-                            }
-                            _ => {}
-                        }
+                                // 워커가 보낸 메시지 종류에 따라 라우팅 테이블을 업데이트합니다.
+                                match packet.msg {
+                                    RtcSignal::NewPeer => {
+                                        log::info!(
+                                            "[External] New peer '{}' registered in routing table.",
+                                            client_id
+                                        );
+                                        switching_table
+                                            .lock()
+                                            .await
+                                            .insert(client_id.clone(), WsRouteInfo::External);
+                                    }
+                                    RtcSignal::PeerLeft => {
+                                        log::info!(
+                                            "[External] Peer '{}' removed from routing table.",
+                                            client_id
+                                        );
+                                        switching_table.lock().await.remove(&client_id);
+                                    }
+                                    _ => {}
+                                }
 
-                        // 모든 패킷은 Supervisor에게 전달하여 PeerManager가 처리하도록 합니다.
-                        if sh_pm_tx.send(packet).await.is_err() {
-                            break;
+                                // 모든 패킷은 Supervisor에게 전달하여 PeerManager가 처리하도록 합니다.
+                                if sh_pm_tx.send(packet).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
+                    }
+                    // 스트림에서 에러가 발생한 경우 (예: 네트워크 단절)
+                    Some(Err(e)) => {
+                        log::error!("Error reading from external WebSocket: {}. Terminating session.", e);
+                        let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                            external_connection_code: None,
+                            ..old
+                        }).await;
+                        break; // 루프를 종료합니다.
+                    }
+                    // 스트림이 정상적으로 닫힌 경우 (상대방이 연결을 끊음)
+                    None => {
+                        log::info!("External WebSocket connection closed gracefully by remote. Terminating session.");
+                        let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                            external_connection_code: None,
+                            ..old
+                        }).await;
+                        break; // 루프를 종료합니다.
                     }
                 }
             }
-            log::info!("External connection read task finished.");
         });
 
         // 5. 두 태스크를 함께 관리하고 종료할 수 있는 핸들을 만듭니다.
@@ -220,7 +254,9 @@ impl SignalingHandler {
                                 let external_session_locked = external_session.lock().await;
                                 if let Some(session) = &*external_session_locked {
                                     if let Ok(packet_str) = serde_json::to_string(&command) {
-                                        let _ = session.ws_sender.unbounded_send(TungsteniteMessage::Text(packet_str.into()));
+                                        let _ = session.ws_sender.unbounded_send(
+                                            TungsteniteMessage::Text(packet_str.into()),
+                                        );
                                     }
                                 }
                             }
@@ -250,7 +286,11 @@ impl SignalingHandler {
         let (tx, mut rx) = mpsc::channel::<String>(100);
 
         // 자신의 Sender를 "스위칭 테이블"에 등록
-        state.switching_table.lock().await.insert(client_id.clone(), WsRouteInfo::Local(tx));
+        state
+            .switching_table
+            .lock()
+            .await
+            .insert(client_id.clone(), WsRouteInfo::Local(tx));
 
         // PeerManager에게 새 클라이언트 접속을 'ID만' 알림
         if let Err(e) = state

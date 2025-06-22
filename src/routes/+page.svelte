@@ -7,9 +7,10 @@
 
   // Svelte 및 라이브러리 임포트
   import toast from 'svelte-5-french-toast';
+  import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
   // 컴포넌트 임포트 (shadcn-svelte 등)
-  import { Button } from '@/components/ui/button';
+  import { Button, buttonVariants } from '@/components/ui/button';
   import Input from '@/components/ui/input/input.svelte';
   import { Label } from '@/components/ui/label';
   // Checkbox 임포트 추가
@@ -19,11 +20,12 @@
   // 아이콘 임포트
   import MaterialSymbolsKeyboardArrowDownRounded from '~icons/material-symbols/keyboard-arrow-down-rounded';
   import MaterialSymbolsKeyboardArrowUpRounded from '~icons/material-symbols/keyboard-arrow-up-rounded';
+  import IconCopy from '~icons/material-symbols/content-copy-outline-rounded'; // 복사 아이콘
+  // [추가] 외부 연결(공유)에 어울리는 아이콘 임포트
+  import IconLan from '~icons/material-symbols/lan-outline-rounded';
   import IconConnection from '~icons/mdi/connection';
   import IconPower from '~icons/mdi/power';
   import IconRestart from '~icons/mdi/restart';
-  // import IconServer from '~icons/mdi/server'; // 서버 상태 아이콘
-  // 연결 URL 아이콘 추가
 
   // 타입 및 유틸리티 임포트
   import type PlayerInfo from '$lib/types/PlayerInfo';
@@ -31,6 +33,12 @@
   import { checkUpdates } from '$lib/utils';
   import type GlobalState from '@/types/GlobalState';
   import { Checkbox } from '@/components/ui/checkbox';
+  import {
+    Tooltip,
+    TooltipContent,
+    TooltipProvider,
+    TooltipTrigger,
+  } from '@/components/ui/tooltip';
 
   let globalState = $state<GlobalState>({
     procState: 0,
@@ -39,11 +47,11 @@
   let pLocation = $state<PlayerInfo>(); // 플레이어 위치 정보
   let ipAddress = $state(''); // IP 주소 입력값
   let port = $state(''); // 포트 번호 입력값
-  // let useSecureConnection = $state(false); // 보안 연결(HTTPS/WSS) 사용 여부
   let settingsExpanded = $state<boolean>(false); // 고급 설정 확장 여부
   let trackerError = $state(''); // 트래커 오류 메시지
   let appversion = $state(''); // 앱 버전
   let autoAttachEnabled = $state(false);
+  let connectingExternal = $state(false);
 
   async function silentAttach() {
     try {
@@ -51,7 +59,32 @@
       trackerError = '';
       toast.success('자동으로 게임에 연결되었습니다.');
     } catch (err) {
-      console.error('Auto-attach failed:', err);
+      // console.error('Auto-attach failed:', err);
+    }
+  }
+
+  async function connectExternal() {
+    // toast.promise를 사용하여 비동기 작업의 상태를 사용자에게 보여줍니다.
+    const promise = invoke<string>('restart_external_signaling_client'); // 새 Tauri 커맨드 호출
+
+    toast.promise(promise, {
+      loading: '외부 공유방 생성 및 연결 중...',
+      success: (roomCode) => `연결 성공! 방 코드: ${roomCode}`,
+      error: (err) => {
+        console.error('External connection failed:', err);
+        return `방 생성 실패: ${err}`;
+      },
+    });
+  }
+
+  async function copyCodeToClipboard() {
+    if (!globalState.externalConnectionCode) return;
+    try {
+      await writeText(globalState.externalConnectionCode);
+      toast.success('방 코드가 클립보드에 복사되었습니다.');
+    } catch (err) {
+      console.error('Failed to copy code: ', err);
+      toast.error('방 코드 복사에 실패했습니다.');
     }
   }
 
@@ -63,7 +96,6 @@
     if (autoAttachEnabled && globalState.procState === 0) {
       intervalId = setInterval(() => {
         if (globalState.procState === 0) {
-          console.log('자동으로 게임 연결을 시도합니다...');
           silentAttach();
         }
       }, 5000); // 5초
@@ -108,11 +140,6 @@
       .catch((err) => {
         console.error('전역 상태 동기화 실패:', err);
       });
-      
-    invoke<string>('restart_external_signaling_client')
-      .catch((err) => {
-        console.error('외부 연결 실패:', err);
-      });
 
     // 앱 버전 가져오기
     getVersion()
@@ -136,6 +163,7 @@
     const unlistenServerState = listen<GlobalState>(
       'handle-global-state-change',
       (e) => {
+        console.log(e.payload);
         globalState = e.payload;
       },
     );
@@ -232,158 +260,205 @@
       toast.error('URL 복사에 실패했습니다.');
     }
   }
+
+  let formattedConnectionCode = $derived(
+    globalState.externalConnectionCode
+      ? `${globalState.externalConnectionCode.substring(0, 4)}-${globalState.externalConnectionCode.substring(4)}`
+      : '',
+  );
 </script>
 
 <main class="container max-w-xl mx-auto py-6 px-4 space-y-6">
-  <div class="space-y-4 p-4 border rounded-lg bg-background shadow-sm">
-    <div class="flex items-center justify-between pb-2 border-b">
-      <h1 class="text-xl font-semibold">명조 맵스 트래커</h1>
-      {#if appversion}
-        <Badge variant="outline">v{appversion}</Badge>
-      {/if}
-    </div>
+  <TooltipProvider>
+    <div class="space-y-4 p-4 border rounded-lg bg-background shadow-sm">
+      <div class="flex items-center justify-between pb-2 border-b">
+        <h1 class="text-xl font-semibold">명조 맵스 트래커</h1>
+        <div class="flex items-center space-x-2">
+          <Tooltip>
+            <TooltipTrigger
+              class={buttonVariants({
+                variant: 'ghost',
+                size: 'icon',
+                class: 'rounded-full',
+              })}
+              onclick={connectExternal}
+              disabled={connectingExternal}
+              aria-label="외부 공유방 연결"
+            >
+              <IconLan class="h-5 w-5" />
+            </TooltipTrigger>
 
-<div class="flex items-center space-x-2">
-    <div
-        class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
-    ></div>
-    <p class="font-medium text-md">
-        {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
-    </p>
-    {#if autoAttachEnabled && globalState.procState === 0}
-        <Badge variant="secondary" class="flex items-center gap-1">
-            <IconRestart class="h-3 w-3 animate-spin" />
-            자동 연결 중
-        </Badge>
-    {/if}
-</div>
+            <TooltipContent>
+              <p>외부 공유방 생성/연결</p>
+            </TooltipContent>
+          </Tooltip>
 
-    <div class="flex items-center space-x-2">
-      <div
-        class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
-      ></div>
-      <p class="font-medium text-md">
-        {globalState.serverState === 0 ? '통신 서버 비활성' : '통신 서버 활성'}
-      </p>
-    </div>
-
-    {#if globalState.procState === 1 && pLocation}
-      <div class="bg-muted p-3 rounded-md text-sm mt-2">
-        <p class="font-medium mb-2">플레이어 위치</p>
-        <div class="grid grid-cols-3 gap-2 text-center">
-          <div class="bg-background p-1.5 rounded">
-            X: {Math.round(pLocation.x / 100)}
-          </div>
-          <div class="bg-background p-1.5 rounded">
-            Y: {Math.round(pLocation.y / 100)}
-          </div>
-          <div class="bg-background p-1.5 rounded">
-            Z: {Math.round(pLocation.z / 100)}
-          </div>
+          {#if appversion}
+            <Badge variant="outline">v{appversion}</Badge>
+          {/if}
         </div>
       </div>
-    {/if}
 
-    <div class="flex space-x-3 pt-2">
-      <Button class="flex-1" onclick={attach}>
-        <IconConnection class="mr-2 h-4 w-4" />
-        {#if globalState.procState === 1}
-          게임 재연결
-        {:else}
-          게임 연결
+      <div class="flex items-center space-x-2">
+        <div
+          class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+        ></div>
+        <p class="font-medium text-md">
+          {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
+        </p>
+        {#if autoAttachEnabled && globalState.procState === 0}
+          <Badge variant="secondary" class="flex items-center gap-1">
+            <IconRestart class="h-3 w-3 animate-spin" />
+            자동 연결 중
+          </Badge>
         {/if}
-      </Button>
-      <Button variant="destructive" class="flex-1" onclick={quit}>
-        <IconPower class="mr-2 h-4 w-4" />
-        프로그램 종료
-      </Button>
-    </div>
-  </div>
+      </div>
 
-  <div class="space-y-4">
-    <Button
-      variant="ghost"
-      class="w-full justify-between text-left px-3 py-2 border rounded-lg"
-      onclick={() => (settingsExpanded = !settingsExpanded)}
-      aria-expanded={settingsExpanded}
-      aria-controls="advanced-settings"
-    >
-      고급 설정
-      {#if settingsExpanded}
-        <MaterialSymbolsKeyboardArrowUpRounded class="h-5 w-5" />
-      {:else}
-        <MaterialSymbolsKeyboardArrowDownRounded class="h-5 w-5" />
+      <div class="flex items-center space-x-2">
+        <div
+          class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+        ></div>
+        <p class="font-medium text-md">
+          {globalState.serverState === 0
+            ? '통신 서버 비활성'
+            : '통신 서버 활성'}
+        </p>
+      </div>
+
+      {#if globalState.externalConnectionCode}
+        <div class="flex items-center space-x-2 pt-1">
+          <IconConnection class="h-4 w-4 text-muted-foreground" />
+          <span class="font-medium text-md">공유방 코드:</span>
+          <Badge
+            variant="secondary"
+            class="font-mono text-lg cursor-pointer hover:bg-primary/20"
+            onclick={copyCodeToClipboard}
+            title="클릭하여 복사"
+          >
+            {formattedConnectionCode}
+            <IconCopy class="ml-2 h-4 w-4" />
+          </Badge>
+        </div>
       {/if}
-    </Button>
 
-    {#if settingsExpanded}
-      <div
-        id="advanced-settings"
-        class="space-y-4 p-4 border rounded-lg bg-background shadow-sm"
-      >
-        {#if trackerError}
-          <Alert variant="destructive">
-            <AlertTitle>트래커 오류</AlertTitle>
-            <AlertDescription>{trackerError}</AlertDescription>
-          </Alert>
-        {:else}
-          <div class="text-sm text-muted-foreground p-3 bg-muted rounded-md">
-            현재 보고된 트래커 오류 없음
-          </div>
-        {/if}
-
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div class="space-y-1.5">
-            <Label for="ip">IP 주소 (기본값: 0.0.0.0)</Label>
-            <Input
-              id="ip"
-              type="text"
-              bind:value={ipAddress}
-              placeholder="0.0.0.0"
-            />
-            {#if ipAddress.trim() !== '' && !isIpValid(ipAddress)}
-              <p class="text-xs text-destructive">
-                올바른 IPv4 주소 형식이 아닙니다.
-              </p>
-            {/if}
-          </div>
-          <div class="space-y-1.5">
-            <Label for="port">포트 (기본값: 46821)</Label>
-            <Input
-              id="port"
-              type="number"
-              bind:value={port}
-              placeholder="46821"
-              min="1"
-              max="65535"
-            />
-            {#if port.trim() !== '' && !isPortValid(port === '' ? undefined : +port)}
-              <p class="text-xs text-destructive">
-                1 ~ 65535 사이의 숫자를 입력하세요.
-              </p>
-            {/if}
+      {#if globalState.procState === 1 && pLocation}
+        <div class="bg-muted p-3 rounded-md text-sm mt-2">
+          <p class="font-medium mb-2">플레이어 위치</p>
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div class="bg-background p-1.5 rounded">
+              X: {Math.round(pLocation.x / 100)}
+            </div>
+            <div class="bg-background p-1.5 rounded">
+              Y: {Math.round(pLocation.y / 100)}
+            </div>
+            <div class="bg-background p-1.5 rounded">
+              Z: {Math.round(pLocation.z / 100)}
+            </div>
           </div>
         </div>
+      {/if}
 
-        <!-- <div class="flex items-center space-x-2 pt-3">
+      <div class="flex space-x-3 pt-2">
+        <Button class="flex-1" onclick={attach}>
+          <IconConnection class="mr-2 h-4 w-4" />
+          {#if globalState.procState === 1}
+            게임 재연결
+          {:else}
+            게임 연결
+          {/if}
+        </Button>
+        <Button variant="destructive" class="flex-1" onclick={quit}>
+          <IconPower class="mr-2 h-4 w-4" />
+          프로그램 종료
+        </Button>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <Button
+        variant="ghost"
+        class="w-full justify-between text-left px-3 py-2 border rounded-lg"
+        onclick={() => (settingsExpanded = !settingsExpanded)}
+        aria-expanded={settingsExpanded}
+        aria-controls="advanced-settings"
+      >
+        고급 설정
+        {#if settingsExpanded}
+          <MaterialSymbolsKeyboardArrowUpRounded class="h-5 w-5" />
+        {:else}
+          <MaterialSymbolsKeyboardArrowDownRounded class="h-5 w-5" />
+        {/if}
+      </Button>
+
+      {#if settingsExpanded}
+        <div
+          id="advanced-settings"
+          class="space-y-4 p-4 border rounded-lg bg-background shadow-sm"
+        >
+          {#if trackerError}
+            <Alert variant="destructive">
+              <AlertTitle>트래커 오류</AlertTitle>
+              <AlertDescription>{trackerError}</AlertDescription>
+            </Alert>
+          {:else}
+            <div class="text-sm text-muted-foreground p-3 bg-muted rounded-md">
+              현재 보고된 트래커 오류 없음
+            </div>
+          {/if}
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div class="space-y-1.5">
+              <Label for="ip">IP 주소 (기본값: 0.0.0.0)</Label>
+              <Input
+                id="ip"
+                type="text"
+                bind:value={ipAddress}
+                placeholder="0.0.0.0"
+              />
+              {#if ipAddress.trim() !== '' && !isIpValid(ipAddress)}
+                <p class="text-xs text-destructive">
+                  올바른 IPv4 주소 형식이 아닙니다.
+                </p>
+              {/if}
+            </div>
+            <div class="space-y-1.5">
+              <Label for="port">포트 (기본값: 46821)</Label>
+              <Input
+                id="port"
+                type="number"
+                bind:value={port}
+                placeholder="46821"
+                min="1"
+                max="65535"
+              />
+              {#if port.trim() !== '' && !isPortValid(port === '' ? undefined : +port)}
+                <p class="text-xs text-destructive">
+                  1 ~ 65535 사이의 숫자를 입력하세요.
+                </p>
+              {/if}
+            </div>
+          </div>
+
+          <!-- <div class="flex items-center space-x-2 pt-3">
           <Checkbox id="secure-connection" bind:checked={useSecureConnection} />
           <Label for="secure-connection" class="font-normal cursor-pointer"
             >보안 연결 (HTTPS/WSS) 사용</Label
           >
         </div> -->
 
-        <div class="flex items-center space-x-2 pt-3">
-          <Checkbox id="auto-attach" bind:checked={autoAttachEnabled} />
-          <Label for="auto-attach" class="font-normal cursor-pointer">
-            게임 자동 연결
-          </Label>
-        </div>
+          <div class="flex items-center space-x-2 pt-3">
+            <Checkbox id="auto-attach" bind:checked={autoAttachEnabled} />
+            <Label for="auto-attach" class="font-normal cursor-pointer">
+              게임 자동 연결
+            </Label>
+          </div>
 
-        <Button onclick={applyAndRestart} class="w-full mt-4">
-          <IconRestart class="mr-2 h-4 w-4" />
-          설정 적용 및 서버 재시작
-        </Button>
-      </div>
-    {/if}
-  </div>
+          <Button onclick={applyAndRestart} class="w-full mt-4">
+            <IconRestart class="mr-2 h-4 w-4" />
+            설정 적용 및 서버 재시작
+          </Button>
+        </div>
+      {/if}
+    </div>
+  </TooltipProvider>
 </main>
