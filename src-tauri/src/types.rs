@@ -28,7 +28,7 @@ pub struct FRotator {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, serde::Serialize)]
+#[derive(Copy, Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct PlayerInfo {
     pub x: f32,
     pub y: f32,
@@ -64,6 +64,9 @@ pub enum RtcSignal {
     IceCandidate(RTCIceCandidateInit),
     NewPeer,
     PeerLeft,
+    NewLocalPeer,
+    LocalOffer,
+    Data(PlayerInfo)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -102,6 +105,11 @@ pub enum SupervisorCommand {
 pub struct Peer {
     pub connection: Arc<RTCPeerConnection>,
     pub data_channel: Arc<RTCDataChannel>,
+}
+
+pub enum ManagedPeer {
+    External(Peer),
+    Local
 }
 
 #[derive(Debug)]

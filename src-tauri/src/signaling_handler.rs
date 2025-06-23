@@ -246,7 +246,6 @@ impl SignalingHandler {
                         match route_info {
                             WsRouteInfo::Local(local_sender) => {
                                 if let Ok(msg_str) = serde_json::to_string(&command.msg) {
-                                    // [수정] 라우팅 테이블에서 직접 Sender를 사용합니다.
                                     let _ = local_sender.send(msg_str).await;
                                 }
                             }
@@ -298,7 +297,7 @@ impl SignalingHandler {
             .send(SignalPacket {
                 from: client_id.clone(),
                 to: SERVER_ID.to_string(),
-                msg: RtcSignal::NewPeer,
+                msg: RtcSignal::NewLocalPeer,
             })
             .await
         {
@@ -322,10 +321,10 @@ impl SignalingHandler {
                     match message {
                         Message::Text(text) => {
                             if let Ok(msg) = serde_json::from_slice::<RtcSignal>(text.as_bytes()) {
-                                                      if state.sh_pm_tx.send(SignalPacket{from: client_id.clone(), to: SERVER_ID.to_string(), msg }).await.is_err() {
-                                log::error!("[{}] Failed to send Message signal.", client_id);
-                                // break;
-                            }
+                                if state.sh_pm_tx.send(SignalPacket{from: client_id.clone(), to: SERVER_ID.to_string(), msg }).await.is_err() {
+                                    log::error!("[{}] Failed to send Message signal.", client_id);
+                                    // break;
+                                }
                             }
                         }
                         Message::Close(_) => {

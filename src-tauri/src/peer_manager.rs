@@ -1,5 +1,5 @@
-use crate::types::{Peer, PlayerInfo, RtcSignal, SERVER_ID, SignalPacket};
-use anyhow::{Context, Result};
+use crate::types::{Peer, PlayerInfo, RtcSignal, SERVER_ID, SignalPacket, ManagedPeer};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -10,7 +10,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
 pub(crate) struct PeerManager {
-    peers: HashMap<String, Peer>,
+    peers: HashMap<String, ManagedPeer>,
     pm_sh_tx: mpsc::Sender<SignalPacket>,
 }
 
@@ -25,10 +25,12 @@ impl PeerManager {
     pub async fn handle_signaling_message(&mut self, message: SignalPacket) -> Result<()> {
         let client_id = message.from;
         // 메시지를 처리할 대상 Peer를 찾습니다.
-        let peer = self.peers.get(&client_id).context(format!(
+        let ManagedPeer::External(peer) = self.peers.get(&client_id).context(format!(
             "Received signal for non-existent peer: {}",
             client_id
-        ))?;
+        ))? else {
+            bail!("Received signal for Local peer: {}", client_id);
+        };
 
         match message.msg {
             RtcSignal::Answer(answer) => {
@@ -57,7 +59,20 @@ impl PeerManager {
         Ok(())
     }
 
-    pub async fn handle_new_client(&mut self, client_id: String) -> Result<()> {
+    pub async fn handle_new_local_client(&mut self, client_id: String) -> Result<()> {
+        self.peers.insert(client_id.clone(), ManagedPeer::Local);
+        let signal = SignalPacket {
+            from: "SERVER_ID".to_string(),
+            to: client_id.clone(),
+            msg: RtcSignal::LocalOffer,
+        };
+        if let Err(e) = self.pm_sh_tx.send(signal).await {
+            log::error!("[{}] Failed to send Local Offer message: {}", client_id, e);
+        }
+        Ok(())
+    }
+    
+    pub async fn handle_new_external_client(&mut self, client_id: String) -> Result<()> {
         let api = APIBuilder::new().build();
         let config = RTCConfiguration {
             ice_servers: vec![
@@ -121,22 +136,23 @@ impl PeerManager {
             })
             .await?;
 
-        self.peers.insert(client_id, new_peer);
-
+        self.peers.insert(client_id, ManagedPeer::External(new_peer));
         Ok(())
     }
 
     pub async fn handle_client_disconnect(&mut self, client_id: String) -> Result<()> {
-        if let Some(peer) = self.peers.remove(&client_id) {
-            // PeerConnection을 정상적으로 종료하여 관련 리소스를 모두 해제합니다.
-            if let Err(e) = peer.connection.close().await {
-                // 종료 중 에러가 발생하더라도, 이미 맵에서 제거되었으므로 경고만 기록합니다.
-                log::warn!("[{}] Error while closing peer connection: {}", client_id, e);
-            } else {
-                log::info!(
-                    "[{}] Peer connection closed and resources released.",
-                    client_id
-                );
+        if let Some(m_peer) = self.peers.remove(&client_id) {
+            if let ManagedPeer::External(peer) = m_peer {
+                // PeerConnection을 정상적으로 종료하여 관련 리소스를 모두 해제합니다.
+                if let Err(e) = peer.connection.close().await {
+                    // 종료 중 에러가 발생하더라도, 이미 맵에서 제거되었으므로 경고만 기록합니다.
+                    log::warn!("[{}] Error while closing peer connection: {}", client_id, e);
+                } else {
+                    log::info!(
+                        "[{}] Peer connection closed and resources released.",
+                        client_id
+                    );
+                }
             }
         } else {
             // 이미 제거되었거나 존재하지 않는 클라이언트일 수 있습니다.
@@ -150,13 +166,27 @@ impl PeerManager {
             .context("DataChannel send error: could not serialize data")?;
 
         for (client_id, peer) in &self.peers {
-            if peer.data_channel.ready_state() == RTCDataChannelState::Open {
-                if let Err(e) = peer.data_channel.send_text(&payload).await {
-                    log::warn!(
-                        "[{}] DataChannel send error, but continuing broadcast: {}",
-                        client_id,
-                        e
-                    );
+            match peer {
+                ManagedPeer::Local => {
+                    let packet = SignalPacket {
+                        from: SERVER_ID.to_string(),
+                        to: client_id.clone(),
+                        msg: RtcSignal::Data(message.clone()),
+                    };
+                    if let Err(e) = self.pm_sh_tx.send(packet).await {
+                        log::warn!("[{}] WebSocket send error, but continuing broadcast: {}", client_id, e);
+                    }
+                }
+                ManagedPeer::External(peer) => {
+                    if peer.data_channel.ready_state() == RTCDataChannelState::Open {
+                        if let Err(e) = peer.data_channel.send_text(&payload).await {
+                            log::warn!(
+                                "[{}] DataChannel send error, but continuing broadcast: {}",
+                                client_id,
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }

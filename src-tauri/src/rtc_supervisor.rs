@@ -94,7 +94,7 @@ impl RtcSupervisor {
                     // 수신한 이벤트를 PeerManager의 해당 핸들러에 전달
                     let result = match event.msg {
                         RtcSignal::NewPeer => {
-                            let result = self.peer_manager.handle_new_client(client_id).await;
+                            let result = self.peer_manager.handle_new_external_client(client_id).await;
                             self.try_start_collector().await;
                             result
                         }
@@ -103,6 +103,11 @@ impl RtcSupervisor {
                             if self.peer_manager.peer_count() == 0 {
                                 self.try_stop_collector().await;
                             }
+                            result
+                        }
+                        RtcSignal::NewLocalPeer => {
+                            let result = self.peer_manager.handle_new_local_client(client_id).await;
+                            self.try_start_collector().await;
                             result
                         }
                         _ => {
