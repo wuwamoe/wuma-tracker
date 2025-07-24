@@ -33,7 +33,7 @@ pub struct WinProc {
 
 impl WinProc {
     const OFFSET: WuwaOffset = WuwaOffset {
-        global_gworld: 0x84C55C0,
+        global_gworld: 0x8A36F78,
         uworld_persistentlevel: 0x38,
         uworld_owninggameinstance: 0x1C0,
         ulevel_lastworldorigin: 0xC8,
