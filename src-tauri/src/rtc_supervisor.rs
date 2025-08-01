@@ -99,11 +99,7 @@ impl RtcSupervisor {
                             result
                         }
                         RtcSignal::PeerLeft => {
-                            let result = self.peer_manager.handle_client_disconnect(client_id).await;
-                            if self.peer_manager.peer_count() == 0 {
-                                self.try_stop_collector().await;
-                            }
-                            result
+                            self.peer_manager.handle_client_disconnect(client_id).await
                         }
                         RtcSignal::NewLocalPeer => {
                             let result = self.peer_manager.handle_new_local_client(client_id).await;
@@ -233,9 +229,8 @@ impl RtcSupervisor {
     }
 
     async fn try_start_collector(&mut self) {
-        // 조건: 클라이언트 1명 이상 AND 프로세스 attach 상태 AND 루프가 현재 미실행
-        if self.peer_manager.peer_count() > 0
-            && self.collector_state.instance.lock().await.is_some()
+        // 조건: 프로세스 attach 상태 AND 루프가 현재 미실행
+        if self.collector_state.instance.lock().await.is_some()
             && self.collector_state.shutdown_tx.is_none()
         {
             log::info!("Conditions met. Starting collection loop.");
