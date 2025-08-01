@@ -24,7 +24,18 @@ tauri = { version = "2", features = ["tray-icon", "devtools"] }
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-winapi = { version = "0.3.9", features = ["handleapi", "memoryapi", "minwindef", "ntdef", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "tlhelp32", "winnt", "minwinbase", "winuser"] }
+windows-sys = { version = "0.52.0", features = [ 
+    "Win32_Foundation", 
+    "Win32_System_Diagnostics_ToolHelp", 
+    "Win32_System_Threading", 
+    "Win32_System_Memory", 
+    "Win32_System_SystemServices", 
+    "Win32_Security", 
+    "Win32_UI_Shell", 
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_ProcessStatus", 
+    "Win32_UI_WindowsAndMessaging",
+] }
 tokio = "1.45.1"
 axum = { version = "0.8.3", features = ["ws"] }
 tracing = "0.1.40"

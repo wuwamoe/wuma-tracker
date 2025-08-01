@@ -114,6 +114,16 @@ impl RtcSupervisor {
                     if let Err(e) = result {
                         log::error!("Error handling event: {}", e);
                     }
+
+                    // [추가] 이벤트 처리 후 peer_count 업데이트
+                    let peer_count = self.peer_manager.peer_count(); 
+                    let app_handle_clone = app_handle.clone(); 
+                    tokio::spawn(async move { 
+                        let _ = util::mutate_global_state(app_handle_clone, |mut old| { 
+                            old.peer_count = peer_count; 
+                            old 
+                        }).await; 
+                    }); 
                 }
 
                 Some(msg) = self.collector_rx.recv() => {

@@ -7253,7 +7253,7 @@ dependencies = [
  "tracing",
  "uuid",
  "webrtc",
- "winapi",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
