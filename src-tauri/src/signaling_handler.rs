@@ -1,4 +1,3 @@
-use crate::room_code_generator::generate_room_code_base36;
 use crate::types::{ExternalSession, GlobalState, RtcSignal, SERVER_ID, SignalPacket, WsRouteInfo};
 use crate::util;
 use anyhow::Result;
@@ -9,6 +8,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use futures::channel::mpsc as futures_mpsc;
 use futures::{SinkExt, StreamExt};
+use tokio::time::timeout;
 use std::collections::HashMap;
 use std::string::ToString;
 use std::sync::Arc;
@@ -149,68 +149,94 @@ impl SignalingHandler {
         let (ws_sender, mut ws_receiver) = ws_stream.split();
 
         // 3. command_processor가 사용할 송신 채널(unbounded)을 설정합니다.
-        //    이렇게 중간 채널을 두면 ws_sender(Sink)에 대한 Mutex 래핑 없이 사용할 수 있습니다.
         let (unbounded_tx, unbounded_rx) = futures_mpsc::unbounded();
         // 채널의 Receiver가 받은 메시지를 실제 WebSocket Sender로 전달하는 태스크
         let write_task = tokio::spawn(unbounded_rx.map(Ok).forward(ws_sender));
 
-        // 4. 메시지 수신 및 라우팅 테이블 관리를 위한 태스크를 생성합니다.
+        // 4. 메시지 수신 및 Ping 전송을 위한 태스크를 생성합니다.
         let sh_pm_tx = self.sh_pm_tx.clone();
         let switching_table = self.switching_table.clone();
+        let read_tx = unbounded_tx.clone(); // Ping 메시지를 보내기 위해 송신 채널 복제
         let read_task = tokio::spawn(async move {
             loop {
-                match ws_receiver.next().await {
-                    Some(Ok(msg)) => {
-                        if let TungsteniteMessage::Text(text) = msg {
-                            if let Ok(packet) = serde_json::from_str::<SignalPacket>(&text) {
-                                let client_id = packet.from.clone();
-
-                                // 워커가 보낸 메시지 종류에 따라 라우팅 테이블을 업데이트합니다.
-                                match packet.msg {
-                                    RtcSignal::NewPeer => {
-                                        log::info!(
-                                            "[External] New peer '{}' registered in routing table.",
-                                            client_id
-                                        );
-                                        switching_table
-                                            .lock()
-                                            .await
-                                            .insert(client_id.clone(), WsRouteInfo::External);
-                                    }
-                                    RtcSignal::PeerLeft => {
-                                        log::info!(
-                                            "[External] Peer '{}' removed from routing table.",
-                                            client_id
-                                        );
-                                        switching_table.lock().await.remove(&client_id);
-                                    }
-                                    _ => {}
-                                }
-
-                                // 모든 패킷은 Supervisor에게 전달하여 PeerManager가 처리하도록 합니다.
-                                if sh_pm_tx.send(packet).await.is_err() {
-                                    break;
-                                }
-                            }
+                // 30초 타임아웃으로 메시지 수신 대기
+                match timeout(Duration::from_secs(30), ws_receiver.next()).await {
+                    // 타임아웃 발생 시 Ping 메시지 전송
+                    Err(_) => {
+                        log::info!("[External] Connection idle for 30s, sending Ping.");
+                        if read_tx.unbounded_send(TungsteniteMessage::Ping(vec![].into())).is_err() {
+                            log::error!("[External] Failed to send Ping: connection closed.");
+                            break;
                         }
                     }
+                    // 메시지 정상 수신
+                    Ok(Some(Ok(msg))) => {
+                        match msg {
+                            TungsteniteMessage::Text(text) => {
+                                if let Ok(packet) = serde_json::from_str::<SignalPacket>(&text) {
+                                    let client_id = packet.from.clone();
+
+                                    // 라우팅 테이블 업데이트 로직
+                                    match packet.msg {
+                                        RtcSignal::NewPeer => {
+                                            log::info!(
+                                                "[External] New peer '{}' registered in routing table.",
+                                                client_id
+                                            );
+                                            switching_table
+                                                .lock()
+                                                .await
+                                                .insert(client_id.clone(), WsRouteInfo::External);
+                                        }
+                                        RtcSignal::PeerLeft => {
+                                            log::info!(
+                                                "[External] Peer '{}' removed from routing table.",
+                                                client_id
+                                            );
+                                            switching_table.lock().await.remove(&client_id);
+                                        }
+                                        _ => {}
+                                    }
+
+                                    // Supervisor로 패킷 전달
+                                    if sh_pm_tx.send(packet).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            // 서버로부터 Pong 프레임 수신 시 로그 기록
+                            TungsteniteMessage::Pong(_) => {
+                                log::info!("[External] Received Pong from server.");
+                            }
+                            // 연결 종료 메시지 수신
+                            TungsteniteMessage::Close(_) => {
+                                 log::info!("External WebSocket connection closed by remote. Terminating session.");
+                                 let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                                    external_connection_code: None,
+                                    ..old
+                                 }).await;
+                                 break;
+                            }
+                            _ => {} // Ping, Binary 등의 다른 메시지 타입은 무시
+                        }
+                    }
+                    // 스트림이 정상적으로 닫힘
+                    Ok(None) => {
+                        log::info!("External WebSocket stream ended. Terminating session.");
+                        let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                            external_connection_code: None,
+                            ..old
+                        }).await;
+                        break;
+                    }
                     // 스트림에서 에러가 발생한 경우 (예: 네트워크 단절)
-                    Some(Err(e)) => {
+                    Ok(Some(Err(e))) => {
                         log::error!("Error reading from external WebSocket: {}. Terminating session.", e);
                         let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
                             external_connection_code: None,
                             ..old
                         }).await;
-                        break; // 루프를 종료합니다.
-                    }
-                    // 스트림이 정상적으로 닫힌 경우 (상대방이 연결을 끊음)
-                    None => {
-                        log::info!("External WebSocket connection closed gracefully by remote. Terminating session.");
-                        let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
-                            external_connection_code: None,
-                            ..old
-                        }).await;
-                        break; // 루프를 종료합니다.
+                        break;
                     }
                 }
             }
