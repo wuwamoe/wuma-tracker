@@ -44,6 +44,13 @@ jobs:
       - name: install frontend dependencies
         run: pnpm install # change this to npm, pnpm or bun depending on which one you use.
 
+      - name: Create a copy of the MSI with a fixed name
+        run: |
+          $msiDir = "src-tauri/target/release/bundle/msi/"
+          $msiPath = (Get-ChildItem -Path "${msiDir}/WumaTracker_*_x64_ko-KR.msi").FullName
+          Copy-Item -Path $msiPath -Destination "${msiDir}/WumaTracker_latest_x64_ko-KR.msi"
+        shell: pwsh
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
