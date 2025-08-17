@@ -3,34 +3,31 @@
 
 use std::os::windows::ffi::OsStrExt;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::Security::{
-    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-};
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use winapi::shared::ntdef::NULL;
+use winapi::um::processthreadsapi::OpenProcessToken;
+use winapi::um::securitybaseapi::GetTokenInformation;
+use winapi::um::shellapi::ShellExecuteW;
+use winapi::um::winnt::{HANDLE, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use winapi::um::winuser::SW_SHOWNORMAL;
 
 fn main() {
     if !is_elevated() {
         // 관리자 권한이 아닐 경우, 관리자 권한으로 재실행 시도
         let exe_path = std::env::current_exe().expect("Failed to get current executable path");
-        let exe_path_wide = exe_path
+        let exe_path = exe_path
             .as_os_str()
             .encode_wide()
             .chain(Some(0))
             .collect::<Vec<_>>();
 
-        let runas = "runas\0".encode_utf16().collect::<Vec<u16>>();
-
         unsafe {
             ShellExecuteW(
-                0,
-                runas.as_ptr(),
-                exe_path_wide.as_ptr(),
+                NULL as _,
+                "runas\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
+                exe_path.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
-                SW_SHOWNORMAL as i32,
+                SW_SHOWNORMAL,
             );
         }
         return;
@@ -42,8 +39,13 @@ fn main() {
 fn is_elevated() -> bool {
     let mut is_elevated = false;
     unsafe {
-        let mut token: HANDLE = 0;
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) != 0 {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(
+            winapi::um::processthreadsapi::GetCurrentProcess(),
+            TOKEN_QUERY,
+            &mut token,
+        ) != 0
+        {
             let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
             let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
             if GetTokenInformation(
@@ -56,7 +58,7 @@ fn is_elevated() -> bool {
             {
                 is_elevated = elevation.TokenIsElevated != 0;
             }
-            CloseHandle(token);
+            winapi::um::handleapi::CloseHandle(token);
         }
     }
     is_elevated

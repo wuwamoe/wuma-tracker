@@ -144,7 +144,6 @@ pub struct GlobalState {
     pub server_state: i32,
     pub connection_url: Option<String>,
     pub external_connection_code: Option<String>,
-    pub peer_count: usize,
 }
 
 impl Default for GlobalState {
@@ -154,7 +153,6 @@ impl Default for GlobalState {
             server_state: 0,
             connection_url: None,
             external_connection_code: None,
-            peer_count: 0,
         }
     }
 }

@@ -26,7 +26,6 @@
   import IconConnection from '~icons/mdi/connection';
   import IconPower from '~icons/mdi/power';
   import IconRestart from '~icons/mdi/restart';
-  import IconUsers from '~icons/mdi/account-multiple';
 
   // 타입 및 유틸리티 임포트
   import type PlayerInfo from '$lib/types/PlayerInfo';
@@ -44,7 +43,6 @@
   let globalState = $state<GlobalState>({
     procState: 0,
     serverState: 0,
-    peerCount: 0,
   });
   let pLocation = $state<PlayerInfo>(); // 플레이어 위치 정보
   let ipAddress = $state(''); // IP 주소 입력값
@@ -326,15 +324,6 @@
             : '통신 서버 활성'}
         </p>
       </div>
-
-      {#if globalState.serverState === 1}
-        <div class="flex items-center space-x-2">
-          <IconUsers class="h-4 w-4 text-muted-foreground" />
-          <p class="font-medium text-md">
-            연결된 클라이언트: {globalState.peerCount ?? 0}명
-          </p>
-        </div>
-      {/if}
 
       {#if globalState.externalConnectionCode}
         <div class="flex items-center space-x-2 pt-1">

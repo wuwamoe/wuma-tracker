@@ -1,3 +1,5 @@
+use std::{ffi::CStr, mem, ptr::null_mut};
+
 use crate::types::NativeError;
 use crate::types::NativeError::{PointerChainError, ValueReadError};
 use crate::{
@@ -5,18 +7,21 @@ use crate::{
     types::{FIntVector, PlayerInfo},
 };
 use anyhow::{Context, Result, bail};
-use std::{ffi::CStr, mem};
-use windows_sys::Win32::Foundation::STILL_ACTIVE;
-use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows_sys::Win32::System::ProcessStatus::{EnumProcessModulesEx, LIST_MODULES_DEFAULT};
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE},
-    System::{
-        Diagnostics::ToolHelp::{
+use winapi::um::minwinbase::STILL_ACTIVE;
+use winapi::um::processthreadsapi::GetExitCodeProcess;
+use winapi::{
+    ctypes::c_void,
+    shared::minwindef::{DWORD, HMODULE},
+    um::{
+        handleapi::CloseHandle,
+        memoryapi::ReadProcessMemory,
+        processthreadsapi::OpenProcess,
+        psapi::{EnumProcessModulesEx, LIST_MODULES_DEFAULT},
+        tlhelp32::{
             CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
             TH32CS_SNAPPROCESS,
         },
-        Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+        winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
     },
 };
 
@@ -39,30 +44,34 @@ impl WinProc {
         uscenecomponent_relativelocation: 0x13C,
     };
 
+    /// 프로세스 이름으로 WinProc 인스턴스를 생성합니다.
+    /// PID 찾기, 핸들 열기, 베이스 주소 가져오기를 모두 수행합니다.
     pub fn new(name: &str) -> Result<Self> {
         unsafe {
             let pid = Self::find_pid_by_name(name)
                 .with_context(|| "게임이 실행 중이 아닙니다.".to_string())?;
 
+            // 핸들 열기
             let handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
-            if handle == 0 {
+            if handle.is_null() {
                 bail!(
                     "게임에 연결하지 못했습니다. OS Error: {}",
                     std::io::Error::last_os_error()
                 );
             }
 
-            let mut h_mod = 0;
+            // 베이스 주소 가져오기
+            let mut h_mod: HMODULE = null_mut();
             let mut cb_needed = 0;
             if EnumProcessModulesEx(
                 handle,
                 &mut h_mod,
-                mem::size_of::<isize>() as u32,
+                size_of::<HMODULE>() as DWORD,
                 &mut cb_needed,
                 LIST_MODULES_DEFAULT,
             ) == 0
             {
-                CloseHandle(handle);
+                CloseHandle(handle); // 실패 시 생성된 핸들을 닫아줍니다.
                 bail!(
                     "게임 Base 주소를 가져오지 못했습니다. OS Error: {}",
                     std::io::Error::last_os_error()
@@ -73,7 +82,7 @@ impl WinProc {
                 "Process '{}' connected! PID: {}, Base Address: {:X}",
                 name,
                 pid,
-                h_mod
+                h_mod as u64
             );
 
             Ok(WinProc {
@@ -84,14 +93,15 @@ impl WinProc {
         }
     }
 
+    /// 프로세스가 여전히 실행 중인지 확인합니다.
     pub fn is_alive(&self) -> bool {
-        if self.handle == 0 {
+        if self.handle.is_null() {
             return false;
         }
         unsafe {
-            let mut exit_code: u32 = 0;
+            let mut exit_code: DWORD = 0;
             if GetExitCodeProcess(self.handle, &mut exit_code) != 0 {
-                return exit_code == STILL_ACTIVE as u32;
+                return exit_code == STILL_ACTIVE;
             }
             false
         }
@@ -173,7 +183,9 @@ impl WinProc {
         })
     }
 
+    // 이 메서드는 이제 private으로 만들어 외부에서 직접 호출하지 않도록 할 수 있습니다.
     fn read_memory<T: Copy>(&self, address: u64) -> Option<T> {
+        // 주소 0은 유효하지 않으므로 미리 차단합니다. 포인터 체인이 끊겼을 때 흔히 발생합니다.
         if address == 0 {
             return None;
         }
@@ -183,8 +195,8 @@ impl WinProc {
 
             let success = ReadProcessMemory(
                 self.handle,
-                address as *const _,
-                &mut buffer as *mut T as *mut _,
+                address as *const c_void,
+                &mut buffer as *mut T as *mut c_void,
                 mem::size_of::<T>(),
                 &mut bytes_read,
             );
@@ -197,39 +209,37 @@ impl WinProc {
         }
     }
 
+    // 헬퍼 함수로 분리하여 new에서 사용
     unsafe fn find_pid_by_name(name: &str) -> Option<u32> {
-        unsafe {
-            let h_process_snap: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if h_process_snap == -1 {
-                return None;
-            }
+        let h_process_snap: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if h_process_snap.is_null() {
+            return None;
+        }
 
-            let mut pe32: PROCESSENTRY32 = mem::zeroed();
-            pe32.dwSize = mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut pe32: PROCESSENTRY32 = mem::zeroed();
+        pe32.dwSize = size_of::<PROCESSENTRY32>() as u32;
 
-            if Process32First(h_process_snap, &mut pe32) != 0 {
-                loop {
-                    let exe_file_ptr = pe32.szExeFile.as_ptr() as *const i8;
-                    let exe_file = CStr::from_ptr(exe_file_ptr);
-                    if exe_file.to_string_lossy() == name {
-                        CloseHandle(h_process_snap);
-                        return Some(pe32.th32ProcessID);
-                    }
-                    if Process32Next(h_process_snap, &mut pe32) == 0 {
-                        break;
-                    }
+        if Process32First(h_process_snap, &mut pe32) != 0 {
+            loop {
+                let exe_file = CStr::from_ptr(pe32.szExeFile.as_ptr());
+                if exe_file.to_string_lossy() == name {
+                    CloseHandle(h_process_snap);
+                    return Some(pe32.th32ProcessID);
+                }
+                if Process32Next(h_process_snap, &mut pe32) == 0 {
+                    break;
                 }
             }
-
-            CloseHandle(h_process_snap);
-            None
         }
+
+        CloseHandle(h_process_snap);
+        None
     }
 }
 
 impl Drop for WinProc {
     fn drop(&mut self) {
-        if self.handle != 0 {
+        if !self.handle.is_null() {
             log::info!("Closing handle for PID {}", self.pid);
             unsafe {
                 CloseHandle(self.handle);
@@ -237,3 +247,5 @@ impl Drop for WinProc {
         }
     }
 }
+
+unsafe impl Send for WinProc {}
