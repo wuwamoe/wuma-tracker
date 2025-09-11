@@ -1,4 +1,6 @@
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct WuwaOffset {
+    pub name: &'static str,
     pub global_gworld: u64,
     pub uworld_persistentlevel: u64,
     pub uworld_owninggameinstance: u64,

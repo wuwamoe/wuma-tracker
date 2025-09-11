@@ -24,15 +24,9 @@ use winapi::{
         winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
     },
 };
-
-pub struct WinProc {
-    pid: u32,
-    pub base_addr: u64,
-    handle: HANDLE,
-}
-
-impl WinProc {
-    const OFFSET: WuwaOffset = WuwaOffset {
+const OFFSET_VARIANTS: [WuwaOffset; 2] = [
+    WuwaOffset {
+        name: "v2.6.0",
         global_gworld: 0x8DAC538,
         uworld_persistentlevel: 0x38,
         uworld_owninggameinstance: 0x1C0,
@@ -42,8 +36,29 @@ impl WinProc {
         aplayercontroller_acknowlegedpawn: 0x340,
         aactor_rootcomponent: 0x1A0,
         uscenecomponent_relativelocation: 0x13C,
-    };
+    },
+    WuwaOffset {
+        name: "v2.6.2",
+        global_gworld: 0x893E848,
+        uworld_persistentlevel: 0x38,
+        uworld_owninggameinstance: 0x1C0,
+        ulevel_lastworldorigin: 0xC8,
+        ugameinstance_localplayers: 0x40,
+        uplayer_playercontroller: 0x38,
+        aplayercontroller_acknowlegedpawn: 0x340,
+        aactor_rootcomponent: 0x1A0,
+        uscenecomponent_relativelocation: 0x13C,
+    },
+];
 
+pub struct WinProc {
+    pid: u32,
+    pub base_addr: u64,
+    handle: HANDLE,
+    offset: Option<WuwaOffset>,
+}
+
+impl WinProc {
     /// 프로세스 이름으로 WinProc 인스턴스를 생성합니다.
     /// PID 찾기, 핸들 열기, 베이스 주소 가져오기를 모두 수행합니다.
     pub fn new(name: &str) -> Result<Self> {
@@ -89,6 +104,7 @@ impl WinProc {
                 pid,
                 base_addr: h_mod as u64,
                 handle,
+                offset: None,
             })
         }
     }
@@ -107,80 +123,35 @@ impl WinProc {
         }
     }
 
-    pub fn get_location(&self) -> Result<PlayerInfo, NativeError> {
+    pub fn get_location(&mut self) -> Result<PlayerInfo, NativeError> {
         if !self.is_alive() {
             return Err(NativeError::ProcessTerminated);
         }
 
-        let targets = [
-            ("GWorld", Self::OFFSET.global_gworld),
-            ("OwningGameInstance", Self::OFFSET.uworld_owninggameinstance),
-            (
-                "TArray<*LocalPlayers>",
-                Self::OFFSET.ugameinstance_localplayers,
-            ),
-            ("LocalPlayer", 0),
-            ("PlayerController", Self::OFFSET.uplayer_playercontroller),
-            ("APawn", Self::OFFSET.aplayercontroller_acknowlegedpawn),
-            ("RootComponent", Self::OFFSET.aactor_rootcomponent),
-        ];
-
-        let mut last_addr = self.base_addr;
-        for t in targets {
-            let target = last_addr + t.1;
-            last_addr = self
-                .read_memory::<u64>(target)
-                .ok_or_else(|| PointerChainError {
-                    message: format!("'{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target),
-                })?;
+        // 이미 성공한 오프셋이 있다면 그것을 사용합니다.
+        if let Some(offset) = self.offset {
+            return self.get_location_with_offset(&offset);
         }
 
-        let target = last_addr + Self::OFFSET.uscenecomponent_relativelocation;
-        let location = self
-            .read_memory::<PlayerInfo>(target)
-            .ok_or_else(|| ValueReadError {
-                message: format!(
-                    "RelativeLocation 위치 ({:X})의 값을 읽지 못했습니다.",
-                    target
-                ),
-            })?;
-
-        let target_worldorigin = [
-            ("GWorld", Self::OFFSET.global_gworld),
-            ("PersistentLevel", Self::OFFSET.uworld_persistentlevel),
-        ];
-
-        last_addr = self.base_addr;
-        for t in target_worldorigin {
-            let target = last_addr + t.1;
-            last_addr = self
-                .read_memory::<u64>(target)
-                .ok_or_else(|| PointerChainError {
-                    message: format!(
-                        "WorldOrigin을 위한 '{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.",
-                        t.0, target
-                    ),
-                })?;
+        // 성공한 오프셋이 없다면, 모든 변형을 시도합니다.
+        for (i, offset) in OFFSET_VARIANTS.iter().enumerate() {
+            log::info!("Trying offset variant #{} ({})", i + 1, offset.name);
+            if let Ok(location) = self.get_location_with_offset(offset) {
+                log::info!("Offset variant #{} ({}) succeeded. Caching it.", i + 1, offset.name);
+                // 성공하면 오프셋을 저장하고 결과를 반환합니다.
+                self.offset = Some(*offset);
+                return Ok(location);
+            }
         }
-
-        let target = last_addr + Self::OFFSET.ulevel_lastworldorigin;
-        let root_location =
-            self.read_memory::<FIntVector>(target)
-                .ok_or_else(|| ValueReadError {
-                    message: format!(
-                        "LastWorldOrigin 위치 ({:X})의 값을 읽지 못했습니다.",
-                        target
-                    ),
-                })?;
-
-        Ok(PlayerInfo {
-            x: location.x + (root_location.x as f32),
-            y: location.y + (root_location.y as f32),
-            z: location.z + (root_location.z as f32),
-            pitch: location.pitch,
-            yaw: location.yaw,
-            roll: location.roll,
+        
+        // 모든 오프셋이 실패한 경우 에러를 반환합니다.
+        Err(PointerChainError {
+            message: "사용 가능한 버전 값을 찾지 못했습니다.".to_string(),
         })
+    }
+
+    pub fn get_active_offset_name(&self) -> Option<&'static str> {
+        self.offset.map(|o| o.name)
     }
 
     // 이 메서드는 이제 private으로 만들어 외부에서 직접 호출하지 않도록 할 수 있습니다.
@@ -234,6 +205,58 @@ impl WinProc {
 
         CloseHandle(h_process_snap);
         None
+    }
+
+    fn get_location_with_offset(&self, offset: &WuwaOffset) -> Result<PlayerInfo, NativeError> {
+        let targets = [
+            ("GWorld", offset.global_gworld),
+            ("OwningGameInstance", offset.uworld_owninggameinstance),
+            ("TArray<*LocalPlayers>", offset.ugameinstance_localplayers),
+            ("LocalPlayer", 0),
+            ("PlayerController", offset.uplayer_playercontroller),
+            ("APawn", offset.aplayercontroller_acknowlegedpawn),
+            ("RootComponent", offset.aactor_rootcomponent),
+        ];
+
+        let mut last_addr = self.base_addr;
+        for t in targets {
+            let target = last_addr + t.1;
+            last_addr = self.read_memory::<u64>(target).ok_or_else(|| PointerChainError {
+                message: format!("'{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target),
+            })?;
+        }
+
+        let target = last_addr + offset.uscenecomponent_relativelocation;
+        let location = self.read_memory::<PlayerInfo>(target).ok_or_else(|| ValueReadError {
+            message: format!("RelativeLocation 위치 ({:X})의 값을 읽지 못했습니다.", target),
+        })?;
+
+        let target_worldorigin = [
+            ("GWorld", offset.global_gworld),
+            ("PersistentLevel", offset.uworld_persistentlevel),
+        ];
+
+        last_addr = self.base_addr;
+        for t in target_worldorigin {
+            let target = last_addr + t.1;
+            last_addr = self.read_memory::<u64>(target).ok_or_else(|| PointerChainError {
+                message: format!("WorldOrigin을 위한 '{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target),
+            })?;
+        }
+
+        let target = last_addr + offset.ulevel_lastworldorigin;
+        let root_location = self.read_memory::<FIntVector>(target).ok_or_else(|| ValueReadError {
+            message: format!("LastWorldOrigin 위치 ({:X})의 값을 읽지 못했습니다.", target),
+        })?;
+
+        Ok(PlayerInfo {
+            x: location.x + (root_location.x as f32),
+            y: location.y + (root_location.y as f32),
+            z: location.z + (root_location.z as f32),
+            pitch: location.pitch,
+            yaw: location.yaw,
+            roll: location.roll,
+        })
     }
 }
 

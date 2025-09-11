@@ -92,6 +92,7 @@ pub enum CollectorMessage {
     Data(PlayerInfo),
     TemporalError(String),
     Terminated,
+    OffsetFound(String),
 }
 
 #[derive(Debug)]
@@ -144,6 +145,7 @@ pub struct GlobalState {
     pub server_state: i32,
     pub connection_url: Option<String>,
     pub external_connection_code: Option<String>,
+    pub active_offset_name: Option<String>,
 }
 
 impl Default for GlobalState {
@@ -153,6 +155,7 @@ impl Default for GlobalState {
             server_state: 0,
             connection_url: None,
             external_connection_code: None,
+            active_offset_name: None,
         }
     }
 }

@@ -22,6 +22,7 @@ pub async fn collection_loop(
     pm_tx: mpsc::Sender<CollectorMessage>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    let mut offset_reported = false;
     loop {
         // Work Phase
         {
@@ -39,6 +40,16 @@ pub async fn collection_loop(
             match collector.win_proc.get_location() {
                 // 성공 시 데이터 전송
                 Ok(loc) => {
+                    if !offset_reported {
+                        if let Some(name) = collector.win_proc.get_active_offset_name() {
+                            // RtcSupervisor에게 OffsetFound 메시지를 보냅니다.
+                            if pm_tx.send(CollectorMessage::OffsetFound(name.to_string())).await.is_err() {
+                                log::info!("Collection loop exiting: no receiver");
+                                break;
+                            }
+                            offset_reported = true; // 보고 완료로 표시
+                        }
+                    }
                     if pm_tx.send(CollectorMessage::Data(loc)).await.is_err() {
                         log::info!("Collection loop exiting: no receiver");
                         break;

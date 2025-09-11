@@ -306,6 +306,9 @@
         <p class="font-medium text-md">
           {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
         </p>
+        {#if globalState.procState === 1 && globalState.activeOffsetName}
+          <Badge variant="secondary">{globalState.activeOffsetName}</Badge>
+        {/if}
         {#if autoAttachEnabled && globalState.procState === 0}
           <Badge variant="secondary" class="flex items-center gap-1">
             <IconRestart class="h-3 w-3 animate-spin" />

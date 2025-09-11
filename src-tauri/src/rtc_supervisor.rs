@@ -139,6 +139,13 @@ impl RtcSupervisor {
                                 log::error!("Error sending collector error to frontend: {}", e);
                             };
                         }
+                        CollectorMessage::OffsetFound(name) => {
+                            log::info!("Successfully found and locked onto offset: {}", name);
+                            let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
+                                active_offset_name: Some(name.clone()),
+                                ..old
+                            }).await;
+                        }
                     }
                 }
 

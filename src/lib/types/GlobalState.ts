@@ -3,4 +3,5 @@ export default interface GlobalState {
   serverState: number,
   connectionUrl?: string,
   externalConnectionCode?: string,
+  activeOffsetName?: string
 }
