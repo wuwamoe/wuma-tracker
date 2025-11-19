@@ -24,7 +24,7 @@ use winapi::{
         winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
     },
 };
-const OFFSET_VARIANTS: [WuwaOffset; 2] = [
+const OFFSET_VARIANTS: [WuwaOffset; 3] = [
     WuwaOffset {
         name: "v2.7.0",
         global_gworld: 0x86E88E0,
@@ -37,9 +37,21 @@ const OFFSET_VARIANTS: [WuwaOffset; 2] = [
         aactor_rootcomponent: 0x1A0,
         uscenecomponent_relativelocation: 0x13C,
     },
-        WuwaOffset {
+    WuwaOffset {
         name: "v2.7.0-2",
         global_gworld: 0x86EA8F0,
+        uworld_persistentlevel: 0x38,
+        uworld_owninggameinstance: 0x1C0,
+        ulevel_lastworldorigin: 0xC8,
+        ugameinstance_localplayers: 0x40,
+        uplayer_playercontroller: 0x38,
+        aplayercontroller_acknowlegedpawn: 0x340,
+        aactor_rootcomponent: 0x1A0,
+        uscenecomponent_relativelocation: 0x13C,
+    },
+    WuwaOffset {
+        name: "v2.8.0",
+        global_gworld: 0x8B53050,
         uworld_persistentlevel: 0x38,
         uworld_owninggameinstance: 0x1C0,
         ulevel_lastworldorigin: 0xC8,
