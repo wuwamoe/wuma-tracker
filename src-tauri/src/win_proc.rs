@@ -51,7 +51,7 @@ const OFFSET_VARIANTS: [WuwaOffset; 3] = [
     },
     WuwaOffset {
         name: "v2.8.0",
-        global_gworld: 0x8B53050,
+        global_gworld: 0x8E752E8,
         uworld_persistentlevel: 0x38,
         uworld_owninggameinstance: 0x1B8,
         ulevel_lastworldorigin: 0xC8,
