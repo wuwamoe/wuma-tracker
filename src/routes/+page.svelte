@@ -52,6 +52,7 @@
   let appversion = $state(''); // 앱 버전
   let autoAttachEnabled = $state(false);
   let connectingExternal = $state(false);
+  let startInTray = $state(false);
 
   async function silentAttach() {
     try {
@@ -123,9 +124,8 @@
         if (isPortValid(config.port)) {
           port = `${config.port ?? ''}`;
         }
-        // 보안 연결 설정 불러오기 (기본값 false)
-        // useSecureConnection = config.useSecureConnection ?? false;
         autoAttachEnabled = config.autoAttachEnabled ?? false;
+        startInTray = config.startInTray ?? false;
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -231,6 +231,7 @@
         port: portNumber,
         useSecureConnection: null, // 보안 연결 설정 저장
         autoAttachEnabled: autoAttachEnabled,
+        startInTray: startInTray,
       });
       await invoke('restart_server'); // 이 호출 후 백엔드가 상태 변경 이벤트를 보내야 함
     };
@@ -453,6 +454,13 @@
             <Checkbox id="auto-attach" bind:checked={autoAttachEnabled} />
             <Label for="auto-attach" class="font-normal cursor-pointer">
               게임 자동 연결
+            </Label>
+          </div>
+
+          <div class="flex items-center space-x-2 pt-3">
+            <Checkbox id="start-in-tray" bind:checked={startInTray} />
+            <Label for="start-in-tray" class="font-normal cursor-pointer">
+              트레이 상태로 시작 (윈도우 숨김)
             </Label>
           </div>
 

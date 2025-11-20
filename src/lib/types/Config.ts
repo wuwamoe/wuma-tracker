@@ -3,4 +3,5 @@ export default interface AppConfig {
   port?: number;
   useSecureConnection?: boolean;
   autoAttachEnabled?: boolean;
+  startInTray?: boolean;
 }

@@ -53,6 +53,7 @@ pub struct LocalStorageConfig {
     pub port: Option<u16>,
     pub use_secure_connection: Option<bool>,
     pub auto_attach_enabled: Option<bool>,
+    pub start_in_tray: Option<bool>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -134,6 +135,7 @@ impl Default for LocalStorageConfig {
             port: None,
             use_secure_connection: None,
             auto_attach_enabled: None,
+            start_in_tray: None,
         }
     }
 }

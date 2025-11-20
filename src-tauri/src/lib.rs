@@ -17,6 +17,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
@@ -53,6 +54,7 @@ async fn write_config(
     port: Option<u16>,
     use_secure_connection: Option<bool>,
     auto_attach_enabled: Option<bool>,
+    start_in_tray: Option<bool>,
 ) -> Result<(), String> {
     let Ok(_) = util::write_config(
         app_handle,
@@ -61,6 +63,7 @@ async fn write_config(
             port,
             use_secure_connection,
             auto_attach_enabled,
+            start_in_tray,
         },
     )
     .await
@@ -152,6 +155,7 @@ pub async fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let quit_menu = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
             let show_menu = MenuItem::with_id(app, "show", "창 표시", true, None::<&str>)?;
@@ -203,6 +207,24 @@ pub async fn run() {
             let handle = app.handle().clone();
             tokio::spawn(async move {
                 let config = get_config(handle.clone()).await.unwrap_or_default();
+            
+                // 트레이 시작 설정
+                let start_in_tray = config.start_in_tray.unwrap_or(false);
+                if !start_in_tray {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                } else {
+                    if let Err(e) = handle.notification()
+                        .builder()
+                        .title("명조 맵스 트래커")
+                        .body("프로그램이 시스템 트레이에서 실행 중입니다.")
+                        .show() {
+                        log::error!("알림 발송 실패: {}", e);
+                    }
+                }
+
                 rtc_supervisor
                     .run(
                         handle,

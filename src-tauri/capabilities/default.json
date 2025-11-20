@@ -8,6 +8,7 @@
     "shell:allow-open",
     "updater:default",
     "process:allow-exit",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "notification:default"
   ]
 }

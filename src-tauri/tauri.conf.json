@@ -16,7 +16,8 @@
         "label": "main",
         "title": "명조 맵스 트래커",
         "width": 600,
-        "height": 450
+        "height": 450,
+        "visible": false
       }
     ],
     "security": {
