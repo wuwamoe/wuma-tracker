@@ -71,11 +71,20 @@ impl RtcSupervisor {
     ) -> Result<(), String> {
         log::info!("Starting RtcSupervisor...");
 
-        // 1. SignalingHandler의 내부 태스크들(웹소켓 서버, 명령 처리기)을 시작시킵니다.
-        self.signaling_handler
+        if let Err(e) = self.signaling_handler
             .restart_local_server(app_handle.clone(), ip, port)
-            .await?;
-        log::info!("SignalingHandler started.");
+            .await 
+        {
+            log::error!("Failed to start SignalingHandler (Port might be in use): {}", e);
+        
+            let error_message = format!("서버 시작 실패 (포트 {}): {}\n포트가 이미 사용 중일 수 있습니다.", port, e);
+            
+            if let Err(emit_err) = app_handle.emit("handle-tracker-error", error_message) {
+                log::error!("Failed to emit error to frontend: {}", emit_err);
+            }
+        } else {
+            log::info!("SignalingHandler started.");
+        }
 
         // 3. RtcSupervisor의 메인 이벤트 루프
         log::info!("RtcSupervisor is now running. Waiting for events...");
