@@ -80,7 +80,7 @@ impl SignalingHandler {
             }
             Err(err) => {
                 let _ = util::mutate_global_state(app_handle.clone(), |old| GlobalState {
-                    server_state: 1,
+                    server_state: 0,
                     connection_url: None,
                     ..old
                 })

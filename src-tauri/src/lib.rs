@@ -228,7 +228,7 @@ pub async fn run() {
                 rtc_supervisor
                     .run(
                         handle,
-                        config.ip.unwrap_or(String::from("0.0.0.0")),
+                        config.ip.unwrap_or(String::from("127.0.0.1")),
                         config.port.unwrap_or(46821),
                         supervisor_rx,
                         shutdown_rx,

@@ -160,6 +160,13 @@
     const unlistenError = listen<string>('handle-tracker-error', (e) => {
       trackerError = e.payload;
     });
+    const unlistenToastError = listen<string>('report-error-toast', (e) => {
+      console.error(e.payload);
+      toast.error(e.payload, {
+        duration: 3000,
+        position: 'top-center',
+      });
+    });
     const unlistenServerState = listen<GlobalState>(
       'handle-global-state-change',
       (e) => {
@@ -173,6 +180,7 @@
       unlistenLocation.then((f) => f());
       unlistenError.then((f) => f());
       unlistenServerState.then((f) => f());
+      unlistenToastError.then((f) => f());
     };
   });
 
@@ -217,8 +225,14 @@
       return;
     }
 
-    const portNumber = port.trim() === '' ? undefined : +port.trim();
-    if (port.trim() !== '' && !isPortValid(portNumber)) {
+    const isPortEmpty =
+      port === null || port === undefined || String(port).trim() === '';
+
+    // 2. 포트 번호 변환 (비었으면 undefined, 아니면 숫자로)
+    const portNumber = isPortEmpty ? undefined : Number(port);
+
+    // 3. 유효성 검사 (비어있지 않은데 유효하지 않은 숫자라면 에러)
+    if (!isPortEmpty && !isPortValid(portNumber)) {
       toast.error('포트 번호가 올바르지 않습니다. (1 ~ 65535 사이의 숫자)');
       return;
     }
@@ -412,12 +426,12 @@
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div class="space-y-1.5">
-              <Label for="ip">IP 주소 (기본값: 0.0.0.0)</Label>
+              <Label for="ip">IP 주소 (기본값: 127.0.0.1)</Label>
               <Input
                 id="ip"
                 type="text"
                 bind:value={ipAddress}
-                placeholder="0.0.0.0"
+                placeholder="127.0.0.1"
               />
               {#if ipAddress.trim() !== '' && !isIpValid(ipAddress)}
                 <p class="text-xs text-destructive">
@@ -435,7 +449,7 @@
                 min="1"
                 max="65535"
               />
-              {#if port.trim() !== '' && !isPortValid(port === '' ? undefined : +port)}
+              {#if port !== null && port !== undefined && String(port).trim() !== '' && !isPortValid(Number(port))}
                 <p class="text-xs text-destructive">
                   1 ~ 65535 사이의 숫자를 입력하세요.
                 </p>

@@ -77,9 +77,9 @@ impl RtcSupervisor {
         {
             log::error!("Failed to start SignalingHandler (Port might be in use): {}", e);
         
-            let error_message = format!("서버 시작 실패 (포트 {}): {}\n포트가 이미 사용 중일 수 있습니다.", port, e);
+            let error_message = format!("서버 시작 실패 (포트 {}): {}", port, e);
             
-            if let Err(emit_err) = app_handle.emit("handle-tracker-error", error_message) {
+            if let Err(emit_err) = app_handle.emit("report-error-toast", error_message) {
                 log::error!("Failed to emit error to frontend: {}", emit_err);
             }
         } else {
@@ -169,10 +169,16 @@ impl RtcSupervisor {
                             let config = util::get_config(app_handle.clone()).await.unwrap_or_default();
                             if let Err(e) = self.signaling_handler.restart_local_server(
                                 app_handle.clone(),
-                                config.ip.unwrap_or(String::from("0.0.0.0")),
+                                config.ip.unwrap_or(String::from("127.0.0.1")),
                                 config.port.unwrap_or(46821),
                             ).await {
                                 log::error!("Restart local signaling server failed: {}", e);
+
+                                let error_message = format!("서버 시작 실패 (포트 {}): {}", port, e);
+            
+                                if let Err(emit_err) = app_handle.emit("report-error-toast", error_message) {
+                                    log::error!("Failed to emit error to frontend: {}", emit_err);
+                                }
                             };
                         }
                         SupervisorCommand::RestartExternalConnection(responder) => {
