@@ -326,7 +326,7 @@
         {/if}
         {#if autoAttachEnabled && globalState.procState === 0}
           <Badge variant="secondary" class="flex items-center gap-1">
-            <IconRestart class="h-3 w-3 animate-spin" />
+            <IconRestart class="h-3 w-3 animate-reverse-spin" />
             자동 연결 중
           </Badge>
         {/if}
