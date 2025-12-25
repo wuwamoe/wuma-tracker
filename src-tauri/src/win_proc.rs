@@ -1,6 +1,6 @@
 use std::{ffi::CStr, mem, ptr::null_mut};
-
-use crate::types::NativeError;
+use std::f32::consts::PI;
+use crate::types::{FTransformDouble, NativeError};
 use crate::types::NativeError::{PointerChainError, ValueReadError};
 use crate::{
     offsets::WuwaOffset,
@@ -35,7 +35,7 @@ const OFFSET_VARIANTS: [WuwaOffset; 2] = [
         uplayer_playercontroller: 0x38,
         aplayercontroller_acknowlegedpawn: 0x340,
         aactor_rootcomponent: 0x1A0,
-        uscenecomponent_relativelocation: 0x13C,
+        uscenecomponent_componenttoworld: 0x1E0,
     },
     WuwaOffset {
         name: "v3.0.0",
@@ -47,7 +47,7 @@ const OFFSET_VARIANTS: [WuwaOffset; 2] = [
         uplayer_playercontroller: 0x38,
         aplayercontroller_acknowlegedpawn: 0x340,
         aactor_rootcomponent: 0x1A0,
-        uscenecomponent_relativelocation: 0x13C,
+        uscenecomponent_componenttoworld: 0x1E0,
     }
 ];
 
@@ -135,7 +135,6 @@ impl WinProc {
 
         // 성공한 오프셋이 없다면, 모든 변형을 시도합니다.
         for (i, offset) in OFFSET_VARIANTS.iter().enumerate() {
-            log::info!("Trying offset variant #{} ({})", i + 1, offset.name);
             if let Ok(location) = self.get_location_with_offset(offset) {
                 log::info!("Offset variant #{} ({}) succeeded. Caching it.", i + 1, offset.name);
                 // 성공하면 오프셋을 저장하고 결과를 반환합니다.
@@ -207,6 +206,30 @@ impl WinProc {
         None
     }
 
+    fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {
+        // 언리얼 엔진 좌표계 변환 로직
+        // Roll (X축 회전)
+        let sinr_cosp = 2.0 * (w * x + y * z);
+        let cosr_cosp = 1.0 - 2.0 * (x * x + y * y);
+        let roll = sinr_cosp.atan2(cosr_cosp);
+
+        // Pitch (Y축 회전)
+        let sinp = 2.0 * (w * y - z * x);
+        let pitch = if sinp.abs() >= 1.0 {
+            (PI / 2.0).copysign(sinp) // 90도 제한
+        } else {
+            sinp.asin()
+        };
+
+        // Yaw (Z축 회전)
+        let siny_cosp = 2.0 * (w * z + x * y);
+        let cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+        let yaw = siny_cosp.atan2(cosy_cosp);
+
+        // 라디안 -> 도(Degree) 변환
+        ((roll * 180.0 / PI), (pitch * 180.0 / PI), (yaw * 180.0 / PI))
+    }
+
     fn get_location_with_offset(&self, offset: &WuwaOffset) -> Result<PlayerInfo, NativeError> {
         let targets = [
             ("GWorld", offset.global_gworld),
@@ -226,10 +249,12 @@ impl WinProc {
             })?;
         }
 
-        let target = last_addr + offset.uscenecomponent_relativelocation;
-        let location = self.read_memory::<PlayerInfo>(target).ok_or_else(|| ValueReadError {
-            message: format!("RelativeLocation 위치 ({:X})의 값을 읽지 못했습니다.", target),
+        let target = last_addr + offset.uscenecomponent_componenttoworld;
+        let location = self.read_memory::<FTransformDouble>(target).ok_or_else(|| ValueReadError {
+            message: format!("FTransform 위치 ({:X})의 값을 읽지 못했습니다.", target),
         })?;
+
+        let (roll, pitch, yaw) = Self::quat_to_euler(location.rot_x, location.rot_y, location.rot_z, location.rot_w);
 
         let target_worldorigin = [
             ("GWorld", offset.global_gworld),
@@ -250,14 +275,16 @@ impl WinProc {
         })?;
 
         Ok(PlayerInfo {
-            x: location.x + (root_location.x as f32),
-            y: location.y + (root_location.y as f32),
-            z: location.z + (root_location.z as f32),
-            pitch: location.pitch,
-            yaw: location.yaw,
-            roll: location.roll,
+            x: location.loc_x + (root_location.x as f32),
+            y: location.loc_y + (root_location.y as f32),
+            z: location.loc_z + (root_location.z as f32),
+            pitch,
+            yaw,
+            roll,
         })
     }
+
+
 }
 
 impl Drop for WinProc {

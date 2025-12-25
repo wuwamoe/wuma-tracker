@@ -46,6 +46,21 @@ pub struct FIntVector {
     pub z: i32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, serde::Serialize)]
+pub struct FTransformDouble {
+    pub rot_x: f32,
+    pub rot_y: f32,
+    pub rot_z: f32,
+    pub rot_w: f32,
+    pub loc_x: f32,
+    pub loc_y: f32,
+    pub loc_z: f32,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub scale_z: f32,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalStorageConfig {
@@ -67,7 +82,7 @@ pub enum RtcSignal {
     PeerLeft,
     NewLocalPeer,
     LocalOffer,
-    Data(PlayerInfo)
+    Data(PlayerInfo),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -111,7 +126,7 @@ pub struct Peer {
 
 pub enum ManagedPeer {
     External(Peer),
-    Local
+    Local,
 }
 
 #[derive(Debug)]

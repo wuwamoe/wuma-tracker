@@ -9,6 +9,6 @@ pub struct WuwaOffset {
     pub uplayer_playercontroller: u64,
     pub aplayercontroller_acknowlegedpawn: u64,
     pub aactor_rootcomponent: u64,
-    pub uscenecomponent_relativelocation: u64,
+    pub uscenecomponent_componenttoworld: u64, // relativelocation에서 +0xB4
     // pub uscenecomponent_relativerotation: u64,
 }
