@@ -7,6 +7,7 @@ mod signaling_handler;
 mod types;
 mod util;
 mod win_proc;
+mod offset_manager;
 
 use std::sync::Arc;
 
@@ -21,10 +22,12 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
+use crate::offsets::WuwaOffset;
 
 struct TauriState {
     supervisor_tx: mpsc::Sender<SupervisorCommand>,
     global_state: Arc<Mutex<GlobalState>>,
+    offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 }
 
 #[tauri::command]
@@ -127,6 +130,10 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
+    let offsets_shared = Arc::new(Mutex::new(None));
+    let offsets_for_setup = offsets_shared.clone();
+    let offsets_for_supervisor = offsets_shared.clone();
+
     let mut builder = tauri::Builder::default().plugin(tauri_plugin_clipboard_manager::init());
     #[cfg(desktop)]
     {
@@ -137,13 +144,14 @@ pub async fn run() {
                 .set_focus();
         }));
     }
-    let mut rtc_supervisor = RtcSupervisor::new();
+    let mut rtc_supervisor = RtcSupervisor::new(offsets_for_supervisor);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (supervisor_tx, supervisor_rx) = mpsc::channel(32);
     let app = builder
         .manage(TauriState {
             supervisor_tx,
             global_state: Arc::new(Mutex::new(GlobalState::default())),
+            offsets: offsets_shared
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -157,6 +165,11 @@ pub async fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            let handle = app.handle().clone();
+            tokio::spawn(async move {
+                offset_manager::start_offset_loading(handle, offsets_for_setup).await;
+            });
+
             let quit_menu = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
             let show_menu = MenuItem::with_id(app, "show", "창 표시", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_menu, &quit_menu])?;

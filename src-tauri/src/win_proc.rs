@@ -1,5 +1,6 @@
 use std::{ffi::CStr, mem, ptr::null_mut};
 use std::f32::consts::PI;
+use std::sync::Arc;
 use crate::types::{FTransformDouble, NativeError};
 use crate::types::NativeError::{PointerChainError, ValueReadError};
 use crate::{
@@ -7,6 +8,7 @@ use crate::{
     types::{FIntVector, PlayerInfo},
 };
 use anyhow::{Context, Result, bail};
+use tokio::sync::Mutex;
 use winapi::um::minwinbase::STILL_ACTIVE;
 use winapi::um::processthreadsapi::GetExitCodeProcess;
 use winapi::{
@@ -24,33 +26,6 @@ use winapi::{
         winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
     },
 };
-const OFFSET_VARIANTS: [WuwaOffset; 2] = [
-    WuwaOffset {
-        name: "v2.8.0",
-        global_gworld: 0x8E752E8,
-        uworld_persistentlevel: 0x38,
-        uworld_owninggameinstance: 0x1B8,
-        ulevel_lastworldorigin: 0xC8,
-        ugameinstance_localplayers: 0x40,
-        uplayer_playercontroller: 0x38,
-        aplayercontroller_acknowlegedpawn: 0x340,
-        aactor_rootcomponent: 0x1A0,
-        uscenecomponent_componenttoworld: 0x1E0,
-    },
-    WuwaOffset {
-        name: "v3.0.0",
-        global_gworld: 0x8CBB6C0,
-        uworld_persistentlevel: 0x38,
-        uworld_owninggameinstance: 0x1B8,
-        ulevel_lastworldorigin: 0xC8,
-        ugameinstance_localplayers: 0x40,
-        uplayer_playercontroller: 0x38,
-        aplayercontroller_acknowlegedpawn: 0x340,
-        aactor_rootcomponent: 0x1A0,
-        uscenecomponent_componenttoworld: 0x1E0,
-    }
-];
-
 pub struct WinProc {
     pid: u32,
     pub base_addr: u64,
@@ -123,22 +98,28 @@ impl WinProc {
         }
     }
 
-    pub fn get_location(&mut self) -> Result<PlayerInfo, NativeError> {
+    pub async fn get_location(&mut self, available_offsets: &Option<Vec<WuwaOffset>>) -> Result<PlayerInfo, NativeError> {
         if !self.is_alive() {
             return Err(NativeError::ProcessTerminated);
         }
 
+        let Some(variants) = available_offsets else {
+            return Err(PointerChainError {
+                message: "오프셋 데이터를 불러오는 중입니다...".to_string(),
+            });
+        };
+
         // 이미 성공한 오프셋이 있다면 그것을 사용합니다.
-        if let Some(offset) = self.offset {
-            return self.get_location_with_offset(&offset);
+        if let Some(offset) = &self.offset {
+            return self.get_location_with_offset(offset);
         }
 
         // 성공한 오프셋이 없다면, 모든 변형을 시도합니다.
-        for (i, offset) in OFFSET_VARIANTS.iter().enumerate() {
+        for (i, offset) in variants.iter().enumerate() {
             if let Ok(location) = self.get_location_with_offset(offset) {
                 log::info!("Offset variant #{} ({}) succeeded. Caching it.", i + 1, offset.name);
                 // 성공하면 오프셋을 저장하고 결과를 반환합니다.
-                self.offset = Some(*offset);
+                self.offset = Some(offset.clone());
                 return Ok(location);
             }
         }
@@ -149,8 +130,8 @@ impl WinProc {
         })
     }
 
-    pub fn get_active_offset_name(&self) -> Option<&'static str> {
-        self.offset.map(|o| o.name)
+    pub fn get_active_offset_name(&self) -> Option<String> {
+        self.offset.as_ref().map(|o| o.name.clone())
     }
 
     // 이 메서드는 이제 private으로 만들어 외부에서 직접 호출하지 않도록 할 수 있습니다.

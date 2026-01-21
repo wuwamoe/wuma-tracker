@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use crate::offsets::WuwaOffset;
 
 /// 단순 Windows Process Wrapper
 pub struct NativeCollector {
@@ -21,6 +22,7 @@ pub async fn collection_loop(
     collector_arc: Arc<Mutex<Option<NativeCollector>>>,
     pm_tx: mpsc::Sender<CollectorMessage>,
     mut shutdown_rx: oneshot::Receiver<()>,
+    offsets_arc: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 ) {
     let mut offset_reported = false;
     loop {
@@ -36,14 +38,16 @@ pub async fn collection_loop(
                 break;
             };
 
+            let offsets_guard = offsets_arc.lock().await;
+
             // 3. get_location을 호출하고 결과를 매칭합니다.
-            match collector.win_proc.get_location() {
+            match collector.win_proc.get_location(&*offsets_guard).await {
                 // 성공 시 데이터 전송
                 Ok(loc) => {
                     if !offset_reported {
                         if let Some(name) = collector.win_proc.get_active_offset_name() {
                             // RtcSupervisor에게 OffsetFound 메시지를 보냅니다.
-                            if pm_tx.send(CollectorMessage::OffsetFound(name.to_string())).await.is_err() {
+                            if pm_tx.send(CollectorMessage::OffsetFound(name)).await.is_err() {
                                 log::info!("Collection loop exiting: no receiver");
                                 break;
                             }

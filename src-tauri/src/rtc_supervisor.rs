@@ -8,6 +8,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, mpsc, oneshot};
+use crate::offsets::WuwaOffset;
 
 struct CollectorState {
     instance: Arc<Mutex<Option<NativeCollector>>>,
@@ -20,6 +21,7 @@ pub struct RtcSupervisor {
     peer_manager: PeerManager,
     // SignalingHandler -> PeerManager 이벤트 수신부
     collector_state: CollectorState,
+    offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 
     sh_pm_rx: mpsc::Receiver<SignalPacket>,
     collector_rx: mpsc::Receiver<CollectorMessage>,
@@ -27,7 +29,7 @@ pub struct RtcSupervisor {
 
 impl RtcSupervisor {
     /// RtcSupervisor를 생성하고 모든 하위 컴포넌트를 초기화 및 연결합니다.
-    pub fn new() -> Self {
+    pub fn new(offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>) -> Self {
         // 1. SignalingHandler와 PeerManager 간의 통신 채널을 생성합니다.
         // sh -> pm: IncomingSignal (새 클라이언트, 메시지, 연결 종료 등)
         // pm -> sh: OutgoingSignal (특정 클라이언트에게 메시지 전송 명령 등)
@@ -54,6 +56,7 @@ impl RtcSupervisor {
                 instance: Arc::new(Mutex::new(None)),
                 shutdown_tx: None,
             },
+            offsets,
             sh_pm_rx,
             collector_rx,
         }
@@ -262,10 +265,12 @@ impl RtcSupervisor {
             let (pm_tx, pm_rx) = mpsc::channel(100);
             self.collector_rx = pm_rx;
 
+            let offsets_for_loop = self.offsets.clone();
             tokio::spawn(collection_loop(
                 self.collector_state.instance.clone(),
                 pm_tx,
                 shutdown_rx,
+                offsets_for_loop,
             ));
         }
     }
