@@ -2,8 +2,8 @@ name: "Build Store MSIX"
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - release
 
 jobs:
   build-msix:
