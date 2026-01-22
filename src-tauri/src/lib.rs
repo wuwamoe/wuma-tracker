@@ -20,6 +20,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
+use windows::core::AgileReference;
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
 use crate::offsets::WuwaOffset;
@@ -127,6 +128,33 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
     };
 }
 
+#[cfg(feature = "store")]
+async fn check_store_updates_background(app_handle: AppHandle) -> Result<(), String> {
+    use windows::Services::Store::StoreContext;
+
+    // 1. 업데이트 확인 (이 단계는 백그라운드에서 수행 가능)
+    let context = StoreContext::GetDefault().map_err(|e| e.to_string())?;
+    let updates = context.GetAppAndOptionalStorePackageUpdatesAsync()
+        .map_err(|e| e.to_string())?.await
+        .map_err(|e| e.to_string())?;
+
+    if updates.Size().map_err(|e| e.to_string())? > 0 {
+        log::info!("Store updates found. Switching to main thread for installation request...");
+
+        let updates_agile = AgileReference::new(&updates).map_err(|e| e.to_string())?;
+
+        app_handle.run_on_main_thread(move || {
+            if let Ok(updates_resolved) = updates_agile.resolve() {
+                if let Ok(store_context) = StoreContext::GetDefault() {
+                    log::info!("Triggering store update dialog on main thread.");
+                    let _ = store_context.RequestDownloadAndInstallStorePackageUpdatesAsync(&updates_resolved);
+                }
+            }
+        }).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
@@ -135,6 +163,10 @@ pub async fn run() {
     let offsets_for_supervisor = offsets_shared.clone();
 
     let mut builder = tauri::Builder::default().plugin(tauri_plugin_clipboard_manager::init());
+    #[cfg(feature = "msi-updater")]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -248,6 +280,17 @@ pub async fn run() {
                     )
                     .await
             });
+
+            #[cfg(feature = "store")]
+            {
+                let handle = app.handle().clone();
+                tokio::spawn(async move {
+                    log::info!("Checking for MS Store updates...");
+                    if let Err(e) = check_store_updates_background(handle).await {
+                        log::error!("Failed to check store updates: {}", e);
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
