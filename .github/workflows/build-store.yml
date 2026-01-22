@@ -1,0 +1,73 @@
+name: "Build Store MSIX"
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-msix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: install pnpm
+        run: npm install -g pnpm
+
+      - name: install dependencies
+        run: pnpm install
+
+      # 1. Tauri 빌드 (store 기능 활성화)
+      - name: Tauri Build (No Bundle)
+        run: pnpm tauri build --no-bundle --features store
+
+      # 2. 버전 정보 추출 및 매니페스트 업데이트
+      - name: Update Manifest Version
+        shell: pwsh
+        run: |
+          # package.json에서 버전 추출 (예: "1.4.0")
+          $rawVersion = (Get-Content package.json | ConvertFrom-Json).version
+          # MSIX 규격에 맞게 4자리 버전으로 변환 (예: "1.4.0.0")
+          $msixVersion = "$rawVersion.0"
+          
+          $manifestPath = "src-tauri/windows/AppxManifest.xml"
+          $content = Get-Content $manifestPath
+          # 플레이스홀더 치환
+          $content = $content -replace "PACKAGE_VERSION", $msixVersion
+          $content | Out-File -FilePath "src-tauri/windows/AppxManifest.xml" -Encoding utf8
+          
+          Write-Host "Updated MSIX Version to: $msixVersion"
+
+      # 3. MSIX 레이아웃 폴더 구성
+      - name: Prepare MSIX Layout
+        shell: pwsh
+        run: |
+          $staging = "msix_staging"
+          New-Item -ItemType Directory -Force -Path "$staging\Assets"
+          
+          # 파일 배치
+          Copy-Item "src-tauri\target\release\wuma-tracker.exe" -Destination "$staging\app.exe"
+          Copy-Item "src-tauri\windows\AppxManifest.xml" -Destination "$staging\AppxManifest.xml"
+          
+          # 아이콘 복사
+          Copy-Item "src-tauri\icons\32x32.png" -Destination "$staging\Assets\Square32x32Logo.png"
+          Copy-Item "src-tauri\icons\128x128.png" -Destination "$staging\Assets\Square128x128Logo.png"
+          Copy-Item "src-tauri\icons\StoreLogo.png" -Destination "$staging\Assets\StoreLogo.png"
+
+      # 4. MakeAppx 패키징 (사이닝 미실시)
+      - name: Create MSIX Package
+        shell: pwsh
+        run: |
+          $makeAppx = Join-Path (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*" | Sort-Object Name -Descending | Select-Object -First 1).FullName "x64\makeappx.exe"
+          & $makeAppx pack /d "msix_staging" /p "WumaTracker_store.msix" /nv
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wuma-tracker-store-msix
+          path: WumaTracker_store.msix
