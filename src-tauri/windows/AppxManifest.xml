@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/desktop/windows10/privilegedcapabilities">
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/rescap/windows10"
+         IgnorableNamespaces="uap rescap">
     <Identity Name="com.wumadevs.wumatracker"
               Publisher="CN=WumaDevs"
               Version="PACKAGE_VERSION"
