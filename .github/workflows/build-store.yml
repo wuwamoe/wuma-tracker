@@ -26,51 +26,72 @@ jobs:
       - name: Tauri Build (No Bundle)
         run: pnpm tauri build --no-bundle --features store
 
-      # 2. 버전 정보 추출 및 매니페스트 업데이트
+      # 2. 버전 정보 추출 및 매니페스트 업데이트 (BOM 없는 UTF-8 처리)
       - name: Update Manifest Version
         shell: pwsh
         run: |
-          # package.json에서 버전 추출 (예: "1.4.0")
           $rawVersion = (Get-Content package.json | ConvertFrom-Json).version
-          # MSIX 규격에 맞게 4자리 버전으로 변환 (예: "1.4.0.0")
           $msixVersion = "$rawVersion.0"
           
           $manifestPath = "src-tauri/windows/AppxManifest.xml"
-          $content = Get-Content $manifestPath
-          # 플레이스홀더 치환
-          $content = $content -replace "PACKAGE_VERSION", $msixVersion
-          $content | Out-File -FilePath "src-tauri/windows/AppxManifest.xml" -Encoding utf8
+          $content = [System.IO.File]::ReadAllText((Resolve-Path $manifestPath))
+          $updatedContent = $content.Replace("PACKAGE_VERSION", $msixVersion)
+          
+          # MakeAppx 오류 방지를 위해 BOM 없는 UTF-8로 저장
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText((Resolve-Path $manifestPath), $updatedContent, $utf8NoBom)
           
           Write-Host "Updated MSIX Version to: $msixVersion"
 
-      # 3. MSIX 레이아웃 폴더 구성
+      # 3. MSIX 레이아웃 폴더 구성 및 아이콘 배치
       - name: Prepare MSIX Layout
         shell: pwsh
         run: |
           $staging = "msix_staging"
+          if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
           New-Item -ItemType Directory -Force -Path "$staging\Assets"
           
-          # 파일 배치
-          Copy-Item "src-tauri\target\release\wuma-tracker.exe" -Destination "$staging\app.exe"
+          # 실행 파일 및 매니페스트 복사
+          Copy-Item "src-tauri\target\release\wuma-tracker.exe" -Destination "$staging\WumaTracker.exe"
           Copy-Item "src-tauri\windows\AppxManifest.xml" -Destination "$staging\AppxManifest.xml"
           
-          # 아이콘 복사
-          Copy-Item "src-tauri\icons\32x32.png" -Destination "$staging\Assets\Square32x32Logo.png"
-          Copy-Item "src-tauri\icons\128x128.png" -Destination "$staging\Assets\Square128x128Logo.png"
-          Copy-Item "src-tauri\icons\StoreLogo.png" -Destination "$staging\Assets\StoreLogo.png"
+          # 기본 아이콘 복사
+          $iconSrc = "src-tauri\icons"
+          Copy-Item "$iconSrc\Square150x150Logo.png" -Destination "$staging\Assets\Square150x150Logo.png"
+          Copy-Item "$iconSrc\Square44x44Logo.png" -Destination "$staging\Assets\Square44x44Logo.png"
+          Copy-Item "$iconSrc\StoreLogo.png" -Destination "$staging\Assets\StoreLogo.png"
+          
+          # 작업 표시줄 투명 배경용 Unplated 아이콘 생성
+          Copy-Item "$iconSrc\Square44x44Logo.png" -Destination "$staging\Assets\Square44x44Logo.targetsize-24_altform-unplated.png"
+          Copy-Item "$iconSrc\Square44x44Logo.png" -Destination "$staging\Assets\Square44x44Logo.targetsize-32_altform-unplated.png"
+          Copy-Item "$iconSrc\Square44x44Logo.png" -Destination "$staging\Assets\Square44x44Logo.targetsize-44_altform-unplated.png"
+          Copy-Item "$iconSrc\Square44x44Logo.png" -Destination "$staging\Assets\Square44x44Logo.targetsize-256_altform-unplated.png"
 
-      # 4. MakeAppx 패키징 (사이닝 미실시)
+      # 4. Resources.pri 자산 인덱스 생성 (아이콘 투명화 핵심)
+      - name: Generate Resources.pri
+        shell: pwsh
+        run: |
+          $sdkBinPath = "C:\Program Files (x86)\Windows Kits\10\bin"
+          $latestVersionDir = Get-ChildItem -Path $sdkBinPath | Where-Object { $_.Name -match "^10\." } | Sort-Object Name -Descending | Select-Object -First 1
+          $makePri = Join-Path $latestVersionDir.FullName "x64\makepri.exe"
+          
+          $staging = "msix_staging"
+          # PRI 구성 파일 생성 및 자산 인덱싱
+          & $makePri createconfig /cf "$staging\priconfig.xml" /dq "ko-KR" /pv "10.0.0" /o
+          & $makePri new /pr "$staging" /cf "$staging\priconfig.xml" /of "$staging\resources.pri" /o
+          
+          # 불필요한 설정 파일 삭제
+          Remove-Item "$staging\priconfig.xml"
+          Write-Host "Resources.pri generated successfully."
+
+      # 5. MakeAppx 패키징
       - name: Create MSIX Package
         shell: pwsh
         run: |
-          # 버전 형식(10.*)으로 시작하는 폴더만 필터링하여 정확한 경로 획득
           $sdkBinPath = "C:\Program Files (x86)\Windows Kits\10\bin"
           $latestVersionDir = Get-ChildItem -Path $sdkBinPath | Where-Object { $_.Name -match "^10\." } | Sort-Object Name -Descending | Select-Object -First 1
           $makeAppx = Join-Path $latestVersionDir.FullName "x64\makeappx.exe"
           
-          Write-Host "Using MakeAppx from: $makeAppx"
-          
-          # /nv 옵션으로 사이닝 없이 패키징
           & $makeAppx pack /d "msix_staging" /p "WumaTracker_store.msix" /nv
 
       - name: Upload Artifact
