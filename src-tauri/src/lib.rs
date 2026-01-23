@@ -32,6 +32,11 @@ struct TauriState {
 }
 
 #[tauri::command]
+fn is_store_build() -> bool {
+    cfg!(feature = "store")
+}
+
+#[tauri::command]
 async fn find_and_attach(app_handle: AppHandle) -> Result<(), String> {
     let state = app_handle.state::<TauriState>();
     let (resp_tx, resp_rx) = oneshot::channel();
@@ -132,7 +137,6 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
 async fn check_store_updates_background(app_handle: AppHandle) -> Result<(), String> {
     use windows::Services::Store::StoreContext;
 
-    // 1. 업데이트 확인 (이 단계는 백그라운드에서 수행 가능)
     let context = StoreContext::GetDefault().map_err(|e| e.to_string())?;
     let updates = context.GetAppAndOptionalStorePackageUpdatesAsync()
         .map_err(|e| e.to_string())?.await
@@ -163,7 +167,7 @@ pub async fn run() {
     let offsets_for_supervisor = offsets_shared.clone();
 
     let mut builder = tauri::Builder::default().plugin(tauri_plugin_clipboard_manager::init());
-    #[cfg(feature = "msi-updater")]
+    #[cfg(not(feature = "store"))]
     {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
@@ -193,7 +197,6 @@ pub async fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
@@ -301,6 +304,7 @@ pub async fn run() {
             channel_get_config,
             channel_get_global_state,
             channel_set_global_state,
+            is_store_build
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

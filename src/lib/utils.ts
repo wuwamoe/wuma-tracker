@@ -1,5 +1,6 @@
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from '@tauri-apps/plugin-process';
+import { invoke } from "@tauri-apps/api/core";
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import toast from "svelte-5-french-toast";
@@ -13,6 +14,11 @@ export function delay(ms: number) {
 }
 
 export async function checkUpdates() {
+    const isStore = await invoke("is_store_build");
+    if (isStore) {
+      return;
+    }
+
     check().then(async (update) => {
 			if (update) {
         const promise = update.downloadAndInstall();

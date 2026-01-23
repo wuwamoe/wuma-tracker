@@ -46,7 +46,7 @@ reqwest = { version = "0.13.1", features = ["json"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.2.4"
-tauri-plugin-updater = { version = "2.8.1", optional = true }
+tauri-plugin-updater = "2.8.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -56,6 +56,4 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [features]
-default = ["msi-updater"]
-msi-updater = ["tauri-plugin-updater"] # MSI용 자가 업데이트 기능
 store = [] # MS Store용 플래그

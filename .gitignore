@@ -9,3 +9,9 @@ node_modules
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 key/myapp.key
+
+.idea
+*.iws
+*.iml
+*.ipr
+msix_staging

@@ -28,12 +28,13 @@
 
     <Capabilities>
         <rescap:Capability Name="runFullTrust" />
+        <rescap:Capability Name="allowElevation" />
     </Capabilities>
 
     <Applications>
         <Application Id="App"
                      Executable="app.exe"
-                     EntryPoint="Windows.AppLifecycle">
+                     EntryPoint="windows.fullTrustApplication">
             <uap:VisualElements
                     DisplayName="명조 맵스 트래커"
                     Description="명조: 워더링 웨이브 맵스 전용 위치 트래커"
@@ -42,10 +43,6 @@
                     Square44x44Logo="Assets\Square32x32Logo.png">
                 <uap:DefaultTile Wide310x150Logo="Assets\Square128x128Logo.png" />
             </uap:VisualElements>
-            <Extensions>
-                <desktop:Extension Category="windows.fullTrustProcess"
-                                   Executable="app.exe" />
-            </Extensions>
         </Application>
     </Applications>
 </Package>
