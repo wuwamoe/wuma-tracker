@@ -1,6 +1,6 @@
 [package]
 name = "wuma-tracker"
-version = "1.5.0"
+version = "1.5.1"
 description = "명조 맵스 트래커"
 authors = ["wumadevs"]
 edition = "2024"
@@ -57,3 +57,9 @@ windows = { version = "0.62.2", features = [
 
 [features]
 store = [] # MS Store용 플래그
+
+[package.metadata.tauri-winres]
+FileDescription = "명조 맵스 트래커"
+ProductName = "WumaTracker"
+CompanyName = "WumaDevs"
+OriginalFilename = "WumaTracker.exe"
