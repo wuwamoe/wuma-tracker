@@ -26,7 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 winapi = { version = "0.3.9", features = ["handleapi", "memoryapi", "minwindef", "ntdef", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "tlhelp32", "winnt", "minwinbase", "winuser"] }
 tokio = "1.45.1"
-axum = { version = "0.8.3", features = ["ws"] }
+axum = { version = "0.8.8", features = ["ws"] }
 tracing = "0.1.40"
 futures = "0.3.31"
 tauri-plugin-process = "2"
@@ -36,13 +36,14 @@ tauri-plugin-dialog = "2.2.2"
 anyhow = "1.0.96"
 webrtc = "0.13.0"
 thiserror = "1"
-tokio-tungstenite = { version = "0.27.0", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
 uuid = { version = "1.17.0", features = ["v4"] }
 tower-http = { version = "0.6.6", features = ["cors"] }
 rand = "0.8"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-notification = "2"
-reqwest = { version = "0.13.1", default-features = false, features = ["json", "blocking", "native-tls"] }
+reqwest = { version = "0.13.1", features = ["json"] }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.2.4"

@@ -162,6 +162,10 @@ async fn check_store_updates_background(app_handle: AppHandle) -> Result<(), Str
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     let offsets_shared = Arc::new(Mutex::new(None));
     let offsets_for_setup = offsets_shared.clone();
     let offsets_for_supervisor = offsets_shared.clone();
