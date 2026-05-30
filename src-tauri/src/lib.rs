@@ -4,6 +4,7 @@ mod native_collector;
 mod offset_manager;
 mod offsets;
 mod peer_manager;
+mod process_backend;
 mod room_code_generator;
 mod rtc_supervisor;
 mod signaling_handler;

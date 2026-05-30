@@ -4,7 +4,11 @@ use crate::offsets::WuwaOffset;
 use crate::types::{CollectorMessage, NativeError};
 #[cfg(windows)]
 use crate::win_proc::WinProc as PlatformProc;
+
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!("Native process tracking is supported only on Windows and macOS.");
 use anyhow::Result;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -15,8 +19,10 @@ pub struct NativeCollector {
 }
 
 impl NativeCollector {
-    pub async fn new(proc_name: &str) -> Result<Self> {
-        let proc = PlatformProc::new(proc_name)?;
+    pub async fn new(proc_name: &str, cache_dir: PathBuf) -> Result<Self> {
+        let proc_name = proc_name.to_string();
+        let proc =
+            tokio::task::spawn_blocking(move || PlatformProc::new(&proc_name, cache_dir)).await??;
         Ok(Self { proc })
     }
 }
@@ -27,7 +33,7 @@ pub async fn collection_loop(
     mut shutdown_rx: oneshot::Receiver<()>,
     offsets_arc: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 ) {
-    let mut offset_reported = false;
+    let mut reported_offset: Option<String> = None;
     loop {
         // Work Phase
         {
@@ -47,18 +53,18 @@ pub async fn collection_loop(
             match collector.proc.get_location(&*offsets_guard).await {
                 // 성공 시 데이터 전송
                 Ok(loc) => {
-                    if !offset_reported {
-                        if let Some(name) = collector.proc.get_active_offset_name() {
+                    if let Some(name) = collector.proc.get_active_offset_name() {
+                        if reported_offset.as_deref() != Some(name.as_str()) {
                             // RtcSupervisor에게 OffsetFound 메시지를 보냅니다.
                             if pm_tx
-                                .send(CollectorMessage::OffsetFound(name))
+                                .send(CollectorMessage::OffsetFound(name.clone()))
                                 .await
                                 .is_err()
                             {
                                 log::info!("Collection loop exiting: no receiver");
                                 break;
                             }
-                            offset_reported = true; // 보고 완료로 표시
+                            reported_offset = Some(name);
                         }
                     }
                     if pm_tx.send(CollectorMessage::Data(loc)).await.is_err() {

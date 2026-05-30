@@ -1,14 +1,10 @@
-use std::{ffi::CStr, mem, ptr::null_mut};
-use std::f32::consts::PI;
-use std::sync::Arc;
-use crate::types::{FTransformDouble, NativeError};
+use std::{ffi::CStr, mem, path::PathBuf, ptr::null_mut};
+
+use crate::process_backend::{ProcessBackend, select_player_info};
+use crate::types::NativeError;
 use crate::types::NativeError::{PointerChainError, ValueReadError};
-use crate::{
-    offsets::WuwaOffset,
-    types::{FIntVector, PlayerInfo},
-};
+use crate::{offsets::WuwaOffset, types::PlayerInfo};
 use anyhow::{Context, Result, bail};
-use tokio::sync::Mutex;
 use winapi::um::minwinbase::STILL_ACTIVE;
 use winapi::um::processthreadsapi::GetExitCodeProcess;
 use winapi::{
@@ -36,7 +32,7 @@ pub struct WinProc {
 impl WinProc {
     /// 프로세스 이름으로 WinProc 인스턴스를 생성합니다.
     /// PID 찾기, 핸들 열기, 베이스 주소 가져오기를 모두 수행합니다.
-    pub fn new(name: &str) -> Result<Self> {
+    pub fn new(name: &str, _cache_dir: PathBuf) -> Result<Self> {
         unsafe {
             let pid = Self::find_pid_by_name(name)
                 .with_context(|| "게임이 실행 중이 아닙니다.".to_string())?;
@@ -84,80 +80,24 @@ impl WinProc {
         }
     }
 
-    /// 프로세스가 여전히 실행 중인지 확인합니다.
-    pub fn is_alive(&self) -> bool {
-        if self.handle.is_null() {
-            return false;
-        }
-        unsafe {
-            let mut exit_code: DWORD = 0;
-            if GetExitCodeProcess(self.handle, &mut exit_code) != 0 {
-                return exit_code == STILL_ACTIVE;
-            }
-            false
-        }
-    }
-
-    pub async fn get_location(&mut self, available_offsets: &Option<Vec<WuwaOffset>>) -> Result<PlayerInfo, NativeError> {
-        if !self.is_alive() {
-            return Err(NativeError::ProcessTerminated);
-        }
-
+    pub async fn get_location(
+        &mut self,
+        available_offsets: &Option<Vec<WuwaOffset>>,
+    ) -> Result<PlayerInfo, NativeError> {
         let Some(variants) = available_offsets else {
             return Err(PointerChainError {
                 message: "오프셋 데이터를 불러오는 중입니다...".to_string(),
             });
         };
 
-        // 이미 성공한 오프셋이 있다면 그것을 사용합니다.
-        if let Some(offset) = &self.offset {
-            return self.get_location_with_offset(offset);
-        }
-
-        // 성공한 오프셋이 없다면, 모든 변형을 시도합니다.
-        for (i, offset) in variants.iter().enumerate() {
-            if let Ok(location) = self.get_location_with_offset(offset) {
-                log::info!("Offset variant #{} ({}) succeeded. Caching it.", i + 1, offset.name);
-                // 성공하면 오프셋을 저장하고 결과를 반환합니다.
-                self.offset = Some(offset.clone());
-                return Ok(location);
-            }
-        }
-        
-        // 모든 오프셋이 실패한 경우 에러를 반환합니다.
-        Err(PointerChainError {
-            message: "사용 가능한 버전 값을 찾지 못했습니다.".to_string(),
-        })
+        let mut cached_offset = self.offset.take();
+        let result = select_player_info(self, &mut cached_offset, variants);
+        self.offset = cached_offset;
+        result
     }
 
     pub fn get_active_offset_name(&self) -> Option<String> {
         self.offset.as_ref().map(|o| o.name.clone())
-    }
-
-    // 이 메서드는 이제 private으로 만들어 외부에서 직접 호출하지 않도록 할 수 있습니다.
-    fn read_memory<T: Copy>(&self, address: u64) -> Option<T> {
-        // 주소 0은 유효하지 않으므로 미리 차단합니다. 포인터 체인이 끊겼을 때 흔히 발생합니다.
-        if address == 0 {
-            return None;
-        }
-        unsafe {
-            let mut buffer: T = mem::zeroed();
-            let mut bytes_read = 0;
-
-            let success = ReadProcessMemory(
-                self.handle,
-                address as *const c_void,
-                &mut buffer as *mut T as *mut c_void,
-                mem::size_of::<T>(),
-                &mut bytes_read,
-            );
-
-            if success != 0 && bytes_read == mem::size_of::<T>() {
-                Some(buffer)
-            } else {
-                None
-            }
-        }
     }
 
     // 헬퍼 함수로 분리하여 new에서 사용
@@ -186,86 +126,59 @@ impl WinProc {
         CloseHandle(h_process_snap);
         None
     }
+}
 
-    fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {
-        // 언리얼 엔진 좌표계 변환 로직
-        // Roll (X축 회전)
-        let sinr_cosp = 2.0 * (w * x + y * z);
-        let cosr_cosp = 1.0 - 2.0 * (x * x + y * y);
-        let roll = sinr_cosp.atan2(cosr_cosp);
-
-        // Pitch (Y축 회전)
-        let sinp = 2.0 * (w * y - z * x);
-        let pitch = if sinp.abs() >= 1.0 {
-            (PI / 2.0).copysign(sinp) // 90도 제한
-        } else {
-            sinp.asin()
-        };
-
-        // Yaw (Z축 회전)
-        let siny_cosp = 2.0 * (w * z + x * y);
-        let cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
-        let yaw = siny_cosp.atan2(cosy_cosp);
-
-        // 라디안 -> 도(Degree) 변환
-        ((roll * 180.0 / PI), (pitch * 180.0 / PI), (yaw * 180.0 / PI))
+impl ProcessBackend for WinProc {
+    fn is_alive(&self) -> bool {
+        if self.handle.is_null() {
+            return false;
+        }
+        unsafe {
+            let mut exit_code: DWORD = 0;
+            if GetExitCodeProcess(self.handle, &mut exit_code) != 0 {
+                return exit_code == STILL_ACTIVE;
+            }
+            false
+        }
     }
 
-    fn get_location_with_offset(&self, offset: &WuwaOffset) -> Result<PlayerInfo, NativeError> {
-        let targets = [
-            ("GWorld", offset.global_gworld),
-            ("OwningGameInstance", offset.uworld_owninggameinstance),
-            ("TArray<*LocalPlayers>", offset.ugameinstance_localplayers),
-            ("LocalPlayer", 0),
-            ("PlayerController", offset.uplayer_playercontroller),
-            ("APawn", offset.aplayercontroller_acknowlegedpawn),
-            ("RootComponent", offset.aactor_rootcomponent),
-        ];
+    fn read_bytes(&self, address: u64, buffer: &mut [u8]) -> Result<(), NativeError> {
+        unsafe {
+            let mut bytes_read = 0;
 
-        let mut last_addr = self.base_addr;
-        for t in targets {
-            let target = last_addr + t.1;
-            last_addr = self.read_memory::<u64>(target).ok_or_else(|| PointerChainError {
-                message: format!("'{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target),
-            })?;
+            let success = ReadProcessMemory(
+                self.handle,
+                address as *const c_void,
+                buffer.as_mut_ptr() as *mut c_void,
+                buffer.len(),
+                &mut bytes_read,
+            );
+
+            if success != 0 && bytes_read == buffer.len() {
+                Ok(())
+            } else {
+                Err(ValueReadError {
+                    message: format!(
+                        "ReadProcessMemory 실패: address={:X}, bytes_read={}/{}",
+                        address,
+                        bytes_read,
+                        buffer.len()
+                    ),
+                })
+            }
         }
-
-        let target = last_addr + offset.uscenecomponent_componenttoworld;
-        let location = self.read_memory::<FTransformDouble>(target).ok_or_else(|| ValueReadError {
-            message: format!("FTransform 위치 ({:X})의 값을 읽지 못했습니다.", target),
-        })?;
-
-        let (roll, pitch, yaw) = Self::quat_to_euler(location.rot_x, location.rot_y, location.rot_z, location.rot_w);
-
-        let target_worldorigin = [
-            ("GWorld", offset.global_gworld),
-            ("PersistentLevel", offset.uworld_persistentlevel),
-        ];
-
-        last_addr = self.base_addr;
-        for t in target_worldorigin {
-            let target = last_addr + t.1;
-            last_addr = self.read_memory::<u64>(target).ok_or_else(|| PointerChainError {
-                message: format!("WorldOrigin을 위한 '{}' 위치 ({:X})의 주소 값을 읽지 못했습니다.", t.0, target),
-            })?;
-        }
-
-        let target = last_addr + offset.ulevel_lastworldorigin;
-        let root_location = self.read_memory::<FIntVector>(target).ok_or_else(|| ValueReadError {
-            message: format!("LastWorldOrigin 위치 ({:X})의 값을 읽지 못했습니다.", target),
-        })?;
-
-        Ok(PlayerInfo {
-            x: location.loc_x + (root_location.x as f32),
-            y: location.loc_y + (root_location.y as f32),
-            z: location.loc_z + (root_location.z as f32),
-            pitch,
-            yaw,
-            roll,
-        })
     }
 
-
+    fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError> {
+        let target = self.base_addr + offset.global_gworld;
+        self.read_memory::<u64>(target)
+            .map_err(|e| PointerChainError {
+                message: format!(
+                    "'GWorld' 위치 ({:X})의 주소 값을 읽지 못했습니다: {}",
+                    target, e
+                ),
+            })
+    }
 }
 
 impl Drop for WinProc {
