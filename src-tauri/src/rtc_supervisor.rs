@@ -1,4 +1,5 @@
 use crate::native_collector::{NativeCollector, collection_loop};
+use crate::offsets::WuwaOffset;
 use crate::peer_manager::PeerManager; // 이전 코드에서 정의
 use crate::room_code_generator::generate_room_code_base36;
 use crate::signaling_handler::SignalingHandler;
@@ -6,9 +7,8 @@ use crate::types::{CollectorMessage, GlobalState, RtcSignal, SignalPacket, Super
 use crate::util;
 use anyhow::Result;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, mpsc, oneshot};
-use crate::offsets::WuwaOffset;
 
 struct CollectorState {
     instance: Arc<Mutex<Option<NativeCollector>>>,
@@ -74,14 +74,18 @@ impl RtcSupervisor {
     ) -> Result<(), String> {
         log::info!("Starting RtcSupervisor...");
 
-        if let Err(e) = self.signaling_handler
+        if let Err(e) = self
+            .signaling_handler
             .restart_local_server(app_handle.clone(), ip, port)
-            .await 
+            .await
         {
-            log::error!("Failed to start SignalingHandler (Port might be in use): {}", e);
-        
+            log::error!(
+                "Failed to start SignalingHandler (Port might be in use): {}",
+                e
+            );
+
             let error_message = format!("서버 시작 실패 (포트 {}): {}", port, e);
-            
+
             if let Err(emit_err) = app_handle.emit("report-error-toast", error_message) {
                 log::error!("Failed to emit error to frontend: {}", emit_err);
             }
@@ -178,7 +182,7 @@ impl RtcSupervisor {
                                 log::error!("Restart local signaling server failed: {}", e);
 
                                 let error_message = format!("서버 시작 실패 (포트 {}): {}", port, e);
-            
+
                                 if let Err(emit_err) = app_handle.emit("report-error-toast", error_message) {
                                     log::error!("Failed to emit error to frontend: {}", emit_err);
                                 }
@@ -226,7 +230,11 @@ impl RtcSupervisor {
         }
 
         // log::info!("Attempting to attach to process: {}", proc_name);
-        match NativeCollector::new(proc_name).await {
+        let cache_dir = app_handle
+            .path()
+            .app_config_dir()
+            .map_err(|e| e.to_string())?;
+        match NativeCollector::new(proc_name, cache_dir).await {
             Ok(collector) => {
                 *self.collector_state.instance.lock().await = Some(collector);
                 log::info!("Process attached successfully.");

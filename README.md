@@ -61,7 +61,15 @@ Tauri, SvelteKit, TypeScript를 기반으로 제작되었습니다.
     pnpm tauri dev
     ```
 
-    macOS에서 게임 프로세스 메모리를 읽으려면 앱이 `com.apple.security.cs.debugger` entitlement로 서명되어야 합니다. 이 저장소의 macOS 번들 설정은 개인 개발/테스트 빌드에서 ad-hoc 서명(`signingIdentity: "-"`)과 `src-tauri/entitlements.plist`를 사용합니다.
+    macOS에서 게임 프로세스 메모리를 읽으려면 앱이 `com.apple.security.cs.debugger` entitlement로 서명되어야 합니다. 개인 개발/테스트 빌드에서 ad-hoc 서명이 필요하면 Tauri build config override로 `signingIdentity: "-"`를 지정할 수 있습니다.
+
+    개발자 계정 없이 개인 테스트/공유용 macOS DMG를 만들려면 다음처럼 ad-hoc 서명으로 빌드할 수 있습니다.
+
+    ```bash
+    pnpm tauri build --bundles dmg --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+    ```
+
+    이 방식은 Developer ID 서명과 notarization을 거치지 않으므로, 다른 Mac에서 처음 열 때 Gatekeeper 경고가 표시될 수 있습니다.
 
 -----
 
