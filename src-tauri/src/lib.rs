@@ -1,4 +1,7 @@
+#[cfg(target_os = "macos")]
+mod mac_proc;
 mod native_collector;
+mod offset_manager;
 mod offsets;
 mod peer_manager;
 mod room_code_generator;
@@ -6,11 +9,12 @@ mod rtc_supervisor;
 mod signaling_handler;
 mod types;
 mod util;
+#[cfg(windows)]
 mod win_proc;
-mod offset_manager;
 
 use std::sync::Arc;
 
+use crate::offsets::WuwaOffset;
 use crate::rtc_supervisor::RtcSupervisor;
 use crate::types::SupervisorCommand;
 use tauri::{
@@ -20,10 +24,15 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
-use windows::core::AgileReference;
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
-use crate::offsets::WuwaOffset;
+#[cfg(all(feature = "store", windows))]
+use windows::core::AgileReference;
+
+#[cfg(windows)]
+const GAME_PROCESS_NAME: &str = "Client-Win64-Shipping.exe";
+#[cfg(target_os = "macos")]
+const GAME_PROCESS_NAME: &str = "Client-Mac-Shipping";
 
 struct TauriState {
     supervisor_tx: mpsc::Sender<SupervisorCommand>,
@@ -43,7 +52,7 @@ async fn find_and_attach(app_handle: AppHandle) -> Result<(), String> {
     state
         .supervisor_tx
         .send(SupervisorCommand::AttachProcess(
-            "Client-Win64-Shipping.exe".to_string(),
+            GAME_PROCESS_NAME.to_string(),
             resp_tx,
         ))
         .await
@@ -133,13 +142,15 @@ async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> 
     };
 }
 
-#[cfg(feature = "store")]
+#[cfg(all(feature = "store", windows))]
 async fn check_store_updates_background(app_handle: AppHandle) -> Result<(), String> {
     use windows::Services::Store::StoreContext;
 
     let context = StoreContext::GetDefault().map_err(|e| e.to_string())?;
-    let updates = context.GetAppAndOptionalStorePackageUpdatesAsync()
-        .map_err(|e| e.to_string())?.await
+    let updates = context
+        .GetAppAndOptionalStorePackageUpdatesAsync()
+        .map_err(|e| e.to_string())?
+        .await
         .map_err(|e| e.to_string())?;
 
     if updates.Size().map_err(|e| e.to_string())? > 0 {
@@ -147,14 +158,17 @@ async fn check_store_updates_background(app_handle: AppHandle) -> Result<(), Str
 
         let updates_agile = AgileReference::new(&updates).map_err(|e| e.to_string())?;
 
-        app_handle.run_on_main_thread(move || {
-            if let Ok(updates_resolved) = updates_agile.resolve() {
-                if let Ok(store_context) = StoreContext::GetDefault() {
-                    log::info!("Triggering store update dialog on main thread.");
-                    let _ = store_context.RequestDownloadAndInstallStorePackageUpdatesAsync(&updates_resolved);
+        app_handle
+            .run_on_main_thread(move || {
+                if let Ok(updates_resolved) = updates_agile.resolve() {
+                    if let Ok(store_context) = StoreContext::GetDefault() {
+                        log::info!("Triggering store update dialog on main thread.");
+                        let _ = store_context
+                            .RequestDownloadAndInstallStorePackageUpdatesAsync(&updates_resolved);
+                    }
                 }
-            }
-        }).map_err(|e| e.to_string())?;
+            })
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -191,7 +205,7 @@ pub async fn run() {
         .manage(TauriState {
             supervisor_tx,
             global_state: Arc::new(Mutex::new(GlobalState::default())),
-            offsets: offsets_shared
+            offsets: offsets_shared,
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -259,7 +273,7 @@ pub async fn run() {
             let handle = app.handle().clone();
             tokio::spawn(async move {
                 let config = get_config(handle.clone()).await.unwrap_or_default();
-            
+
                 // 트레이 시작 설정
                 let start_in_tray = config.start_in_tray.unwrap_or(false);
                 if !start_in_tray {
@@ -268,11 +282,13 @@ pub async fn run() {
                         let _ = window.set_focus();
                     }
                 } else {
-                    if let Err(e) = handle.notification()
+                    if let Err(e) = handle
+                        .notification()
                         .builder()
                         .title("명조 맵스 트래커")
                         .body("프로그램이 시스템 트레이에서 실행 중입니다.")
-                        .show() {
+                        .show()
+                    {
                         log::error!("알림 발송 실패: {}", e);
                     }
                 }
@@ -288,7 +304,7 @@ pub async fn run() {
                     .await
             });
 
-            #[cfg(feature = "store")]
+            #[cfg(all(feature = "store", windows))]
             {
                 let handle = app.handle().clone();
                 tokio::spawn(async move {
