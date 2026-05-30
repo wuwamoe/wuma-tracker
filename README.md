@@ -61,6 +61,8 @@ Tauri, SvelteKit, TypeScript를 기반으로 제작되었습니다.
     pnpm tauri dev
     ```
 
+    macOS에서 게임 프로세스 메모리를 읽으려면 앱이 `com.apple.security.cs.debugger` entitlement로 서명되어야 합니다. 이 저장소의 macOS 번들 설정은 개인 개발/테스트 빌드에서 ad-hoc 서명(`signingIdentity: "-"`)과 `src-tauri/entitlements.plist`를 사용합니다.
+
 -----
 
 ## 📂 프로젝트 구조
@@ -79,6 +81,7 @@ Tauri, SvelteKit, TypeScript를 기반으로 제작되었습니다.
 │   │   ├── peer_manager.rs   # WebRTC Peer 연결 관리
 │   │   ├── signaling_handler.rs # WebSocket 시그널링 처리
 │   │   ├── native_collector.rs # 게임 프로세스 데이터 수집
+│   │   ├── mac_proc.rs       # macOS 프로세스 메모리 접근
 │   │   └── win_proc.rs       # Windows 프로세스 메모리 접근
 │   ├── Cargo.toml            # Rust 의존성 관리
 │   └── tauri.conf.json       # Tauri 설정 파일

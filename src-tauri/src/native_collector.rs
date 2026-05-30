@@ -1,20 +1,23 @@
+#[cfg(target_os = "macos")]
+use crate::mac_proc::MacProc as PlatformProc;
+use crate::offsets::WuwaOffset;
 use crate::types::{CollectorMessage, NativeError};
-use crate::win_proc::WinProc;
+#[cfg(windows)]
+use crate::win_proc::WinProc as PlatformProc;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc, oneshot};
-use crate::offsets::WuwaOffset;
 
-/// 단순 Windows Process Wrapper
+/// OS별 게임 프로세스 래퍼
 pub struct NativeCollector {
-    win_proc: WinProc,
+    proc: PlatformProc,
 }
 
 impl NativeCollector {
     pub async fn new(proc_name: &str) -> Result<Self> {
-        let win_proc = WinProc::new(proc_name)?;
-        Ok(Self { win_proc })
+        let proc = PlatformProc::new(proc_name)?;
+        Ok(Self { proc })
     }
 }
 
@@ -41,13 +44,17 @@ pub async fn collection_loop(
             let offsets_guard = offsets_arc.lock().await;
 
             // 3. get_location을 호출하고 결과를 매칭합니다.
-            match collector.win_proc.get_location(&*offsets_guard).await {
+            match collector.proc.get_location(&*offsets_guard).await {
                 // 성공 시 데이터 전송
                 Ok(loc) => {
                     if !offset_reported {
-                        if let Some(name) = collector.win_proc.get_active_offset_name() {
+                        if let Some(name) = collector.proc.get_active_offset_name() {
                             // RtcSupervisor에게 OffsetFound 메시지를 보냅니다.
-                            if pm_tx.send(CollectorMessage::OffsetFound(name)).await.is_err() {
+                            if pm_tx
+                                .send(CollectorMessage::OffsetFound(name))
+                                .await
+                                .is_err()
+                            {
                                 log::info!("Collection loop exiting: no receiver");
                                 break;
                             }
