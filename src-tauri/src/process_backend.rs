@@ -39,18 +39,18 @@ pub fn select_player_info<B: ProcessBackend>(
         return Err(NativeError::ProcessTerminated);
     }
 
-    if let Some(offset) = cached_offset.clone() {
-        match read_player_info(backend, &offset) {
+    if let Some(offset) = cached_offset.as_ref() {
+        match read_player_info(backend, offset) {
             Ok(location) => return Ok(location),
             Err(e) => {
                 log::warn!(
                     "Cached offset {} failed, retrying all variants: {}",
-                    backend.active_offset_name(&offset),
+                    backend.active_offset_name(offset),
                     e
                 );
-                *cached_offset = None;
             }
         }
+        *cached_offset = None;
     }
 
     for (i, offset) in offsets.iter().enumerate() {

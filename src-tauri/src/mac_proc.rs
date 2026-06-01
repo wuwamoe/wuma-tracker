@@ -1,7 +1,7 @@
 use crate::offsets::WuwaOffset;
-use crate::process_backend::{ProcessBackend, select_player_info};
+use crate::process_backend::ProcessBackend;
+use crate::types::NativeError;
 use crate::types::NativeError::PointerChainError;
-use crate::types::{NativeError, PlayerInfo};
 use anyhow::{Context, Result, bail};
 use goblin::mach::constants::cputype;
 use goblin::mach::load_command::CommandVariant;
@@ -59,7 +59,6 @@ pub struct MacProc {
     pid: c_int,
     task: MachTaskPort,
     gworld_symbol_addr: u64,
-    offset: Option<WuwaOffset>,
 }
 
 struct MachTaskPort {
@@ -134,30 +133,7 @@ impl MacProc {
             pid,
             task,
             gworld_symbol_addr,
-            offset: None,
         })
-    }
-
-    pub async fn get_location(
-        &mut self,
-        available_offsets: &Option<Vec<WuwaOffset>>,
-    ) -> Result<PlayerInfo, NativeError> {
-        let Some(variants) = available_offsets else {
-            return Err(PointerChainError {
-                message: "오프셋 데이터를 불러오는 중입니다...".to_string(),
-            });
-        };
-
-        let mut cached_offset = self.offset.take();
-        let result = select_player_info(self, &mut cached_offset, variants);
-        self.offset = cached_offset;
-        result
-    }
-
-    pub fn get_active_offset_name(&self) -> Option<String> {
-        self.offset
-            .as_ref()
-            .map(|o| <Self as ProcessBackend>::active_offset_name(self, o))
     }
 
     fn find_pid_by_name(name: &str) -> Option<c_int> {
@@ -308,13 +284,9 @@ impl MacProc {
         }
 
         let address = Self::symbol_address(path, symbol)?;
-        cache.entries.retain(|entry| {
-            !(entry.path == path_string
-                && entry.len == metadata.len()
-                && entry.modified_secs == modified_secs
-                && entry.uuid == uuid
-                && entry.symbol == symbol)
-        });
+        cache
+            .entries
+            .retain(|entry| !(entry.path == path_string && entry.symbol == symbol));
         cache.entries.push(GworldSymbolCacheEntry {
             path: path_string,
             len: metadata.len(),

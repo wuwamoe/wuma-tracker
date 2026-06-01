@@ -1,9 +1,9 @@
 use std::{ffi::CStr, mem, path::PathBuf, ptr::null_mut};
 
-use crate::process_backend::{ProcessBackend, select_player_info};
+use crate::offsets::WuwaOffset;
+use crate::process_backend::ProcessBackend;
 use crate::types::NativeError;
 use crate::types::NativeError::{PointerChainError, ValueReadError};
-use crate::{offsets::WuwaOffset, types::PlayerInfo};
 use anyhow::{Context, Result, bail};
 use winapi::um::minwinbase::STILL_ACTIVE;
 use winapi::um::processthreadsapi::GetExitCodeProcess;
@@ -26,7 +26,6 @@ pub struct WinProc {
     pid: u32,
     pub base_addr: u64,
     handle: HANDLE,
-    offset: Option<WuwaOffset>,
 }
 
 impl WinProc {
@@ -75,29 +74,8 @@ impl WinProc {
                 pid,
                 base_addr: h_mod as u64,
                 handle,
-                offset: None,
             })
         }
-    }
-
-    pub async fn get_location(
-        &mut self,
-        available_offsets: &Option<Vec<WuwaOffset>>,
-    ) -> Result<PlayerInfo, NativeError> {
-        let Some(variants) = available_offsets else {
-            return Err(PointerChainError {
-                message: "오프셋 데이터를 불러오는 중입니다...".to_string(),
-            });
-        };
-
-        let mut cached_offset = self.offset.take();
-        let result = select_player_info(self, &mut cached_offset, variants);
-        self.offset = cached_offset;
-        result
-    }
-
-    pub fn get_active_offset_name(&self) -> Option<String> {
-        self.offset.as_ref().map(|o| o.name.clone())
     }
 
     // 헬퍼 함수로 분리하여 new에서 사용
