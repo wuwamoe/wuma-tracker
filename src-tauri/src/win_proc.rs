@@ -187,6 +187,10 @@ impl ProcessBackend for WinProc {
         }
     }
 
+    fn gworld_ready(&self) -> bool {
+        self.gworld_rva != 0
+    }
+
     fn rescan_gworld(&mut self) {
         match scan_gworld_rva(self.handle, self.base_addr) {
             Ok(rva) => {

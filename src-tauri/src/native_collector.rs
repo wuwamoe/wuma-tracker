@@ -12,19 +12,23 @@ compile_error!("Native process tracking is supported only on Windows and macOS."
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-// 500ms 루프 기준 60회 = 30초
-const MAX_GWORLD_RESCAN_FAILURES: u32 = 60;
+// 재스캔 스케줄 (500ms 루프 기준 실패 횟수)
+// gworld_ready=false(ACE 미복호화): 5초 → 30초 → 60초
+// gworld_ready=true(정상, 일시적 오류):          30초 → 60초
+const RESCAN_SCHEDULE_COLD: &[u32] = &[10, 60, 120];
+const RESCAN_SCHEDULE_WARM: &[u32] = &[60, 120];
 
 /// OS별 게임 프로세스 래퍼
 pub struct NativeCollector {
     proc: PlatformProc,
     offset: Option<WuwaOffset>,
     consecutive_failures: u32,
-    rescan_done: bool,
+    rescan_stage: usize,
+    cold_start: bool, // 초기 스캔 실패(ACE 미복호화) 여부
 }
 
 impl NativeCollector {
@@ -32,7 +36,8 @@ impl NativeCollector {
         let proc_name = proc_name.to_string();
         let proc =
             tokio::task::spawn_blocking(move || PlatformProc::new(&proc_name, cache_dir)).await??;
-        Ok(Self { proc, offset: None, consecutive_failures: 0, rescan_done: false })
+        let cold_start = !proc.gworld_ready();
+        Ok(Self { proc, offset: None, consecutive_failures: 0, rescan_stage: 0, cold_start })
     }
 
     fn get_location(
@@ -52,11 +57,15 @@ impl NativeCollector {
             }
             Err(e) => {
                 self.consecutive_failures += 1;
-                if self.consecutive_failures >= MAX_GWORLD_RESCAN_FAILURES && !self.rescan_done {
-                    log::info!("{}회 연속 실패 → GWorld 재스캔", MAX_GWORLD_RESCAN_FAILURES);
-                    self.proc.rescan_gworld();
-                    self.rescan_done = true;
-                    self.offset = None;
+                let schedule = if self.cold_start { RESCAN_SCHEDULE_COLD } else { RESCAN_SCHEDULE_WARM };
+                if let Some(&threshold) = schedule.get(self.rescan_stage) {
+                    if self.consecutive_failures >= threshold {
+                        log::info!("{}회 연속 실패 → GWorld 재스캔 (시도 {})", threshold, self.rescan_stage + 1);
+                        self.proc.rescan_gworld();
+                        self.rescan_stage += 1;
+                        self.consecutive_failures = 0;
+                        self.offset = None;
+                    }
                 }
                 Err(e)
             }
@@ -77,6 +86,7 @@ pub async fn collection_loop(
     offsets_arc: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 ) {
     let mut reported_offset: Option<String> = None;
+    let mut last_error_emit: Option<Instant> = None;
     loop {
         let offsets_snapshot = offsets_arc.lock().await.clone();
         let result = {
@@ -108,6 +118,7 @@ pub async fn collection_loop(
 
         match result {
             Ok((loc, offset_name)) => {
+                last_error_emit = None;
                 if let Some(name) = offset_name {
                     if reported_offset.as_deref() != Some(name.as_str()) {
                         // RtcSupervisor에게 OffsetFound 메시지를 보냅니다.
@@ -135,15 +146,20 @@ pub async fn collection_loop(
                 break;
             }
 
-            // 그 외 모든 오류는 일시적인 것으로 간주
+            // 그 외 모든 오류는 일시적인 것으로 간주 (5초에 1번만 전송)
             Err(e) => {
-                if pm_tx
-                    .send(CollectorMessage::TemporalError(e.to_string()))
-                    .await
-                    .is_err()
-                {
-                    log::info!("Collection loop exiting: no receiver");
-                    break;
+                let should_emit = last_error_emit
+                    .map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
+                if should_emit {
+                    last_error_emit = Some(Instant::now());
+                    if pm_tx
+                        .send(CollectorMessage::TemporalError(e.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        log::info!("Collection loop exiting: no receiver");
+                        break;
+                    }
                 }
             }
         }

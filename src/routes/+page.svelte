@@ -49,6 +49,9 @@
   let port = $state(''); // 포트 번호 입력값
   let settingsExpanded = $state<boolean>(false); // 고급 설정 확장 여부
   let trackerError = $state(''); // 트래커 오류 메시지
+  let errorLastUpdated = $state<number | null>(null); // 마지막 오류 수신 시각
+  let errorElapsed = $state(0); // 오류 표시 경과 시간(초)
+  const showError = $derived(trackerError !== '' && errorElapsed < 60);
   let appversion = $state(''); // 앱 버전
   let autoAttachEnabled = $state(false);
   let connectingExternal = $state(false);
@@ -58,6 +61,7 @@
     try {
       await invoke('find_and_attach');
       trackerError = '';
+      errorLastUpdated = null;
       toast.success('자동으로 게임에 연결되었습니다.');
     } catch (err) {
       // console.error('Auto-attach failed:', err);
@@ -159,6 +163,8 @@
     // 트래커 오류 리스너
     const unlistenError = listen<string>('handle-tracker-error', (e) => {
       trackerError = e.payload;
+      errorLastUpdated = Date.now();
+      errorElapsed = 0;
     });
     const unlistenToastError = listen<string>('report-error-toast', (e) => {
       console.error(e.payload);
@@ -184,6 +190,19 @@
     };
   });
 
+  // 오류 타이머: 오류 수신 시점부터 초 단위로 경과 시간 추적, 60초 후 자동 숨김
+  $effect(() => {
+    const updated = errorLastUpdated;
+    if (!updated) return;
+
+    errorElapsed = 0;
+    const interval = setInterval(() => {
+      errorElapsed = Math.floor((Date.now() - updated) / 1000);
+    }, 1000);
+
+    return () => clearInterval(interval);
+  });
+
   // --- 유효성 검사 함수 ---
   function isIpValid(ipAddr?: string): boolean {
     const regexp = /^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/;
@@ -207,6 +226,7 @@
       loading: '게임 프로세스 찾는 중...',
       success: () => {
         trackerError = '';
+        errorLastUpdated = null;
         return '게임에 성공적으로 연결되었습니다.';
       },
       error: (err) => {
@@ -413,9 +433,9 @@
           id="advanced-settings"
           class="space-y-4 p-4 border rounded-lg bg-background shadow-sm"
         >
-          {#if trackerError}
+          {#if showError}
             <Alert variant="destructive">
-              <AlertTitle>트래커 오류</AlertTitle>
+              <AlertTitle>트래커 오류 ({errorElapsed}초)</AlertTitle>
               <AlertDescription>{trackerError}</AlertDescription>
             </Alert>
           {:else}

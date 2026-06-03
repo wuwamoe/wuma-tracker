@@ -10,6 +10,10 @@ pub trait ProcessBackend {
     fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError>;
     fn rescan_gworld(&mut self) {}
 
+    /// GWorld를 정상적으로 찾은 상태인지 반환한다.
+    /// Windows: 초기 스캔 성공 여부. macOS: 항상 true (심볼 테이블 기반).
+    fn gworld_ready(&self) -> bool { true }
+
     fn active_offset_name(&self, offset: &WuwaOffset) -> String {
         offset.name.clone()
     }
