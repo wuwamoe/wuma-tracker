@@ -430,8 +430,8 @@ impl ProcessBackend for MacProc {
             })
     }
 
-    fn active_offset_name(&self, offset: &WuwaOffset) -> String {
-        format!("mac:{}", offset.name)
+    fn active_offset_name(&self, _offset: &WuwaOffset) -> String {
+        format!("{:X}", self.gworld_symbol_addr)
     }
 }
 

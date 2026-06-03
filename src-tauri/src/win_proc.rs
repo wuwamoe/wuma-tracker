@@ -191,6 +191,14 @@ impl ProcessBackend for WinProc {
         self.gworld_rva != 0
     }
 
+    fn active_offset_name(&self, offset: &WuwaOffset) -> String {
+        if self.gworld_rva != 0 {
+            format!("{:X}", self.gworld_rva)
+        } else {
+            format!("오프셋 {}", offset.name)
+        }
+    }
+
     fn rescan_gworld(&mut self) {
         match scan_gworld_rva(self.handle, self.base_addr) {
             Ok(rva) => {
