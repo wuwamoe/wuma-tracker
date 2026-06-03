@@ -11,7 +11,6 @@
 
   // 컴포넌트 임포트 (shadcn-svelte 등)
   import { Button, buttonVariants } from '@/components/ui/button';
-  import Input from '@/components/ui/input/input.svelte';
   import { Label } from '@/components/ui/label';
   // Checkbox 임포트 추가
   import { Badge } from '@/components/ui/badge';
@@ -45,8 +44,6 @@
     serverState: 0,
   });
   let pLocation = $state<PlayerInfo>(); // 플레이어 위치 정보
-  let ipAddress = $state(''); // IP 주소 입력값
-  let port = $state(''); // 포트 번호 입력값
   let settingsExpanded = $state<boolean>(false); // 고급 설정 확장 여부
   let trackerError = $state(''); // 트래커 오류 메시지
   let errorLastUpdated = $state<number | null>(null); // 마지막 오류 수신 시각
@@ -122,12 +119,6 @@
     // 저장된 설정 불러오기
     invoke<AppConfig>('channel_get_config')
       .then((config) => {
-        if (isIpValid(config.ip)) {
-          ipAddress = config.ip ?? '';
-        }
-        if (isPortValid(config.port)) {
-          port = `${config.port ?? ''}`;
-        }
         autoAttachEnabled = config.autoAttachEnabled ?? false;
         startInTray = config.startInTray ?? false;
       })
@@ -204,20 +195,6 @@
   });
 
   // --- 유효성 검사 함수 ---
-  function isIpValid(ipAddr?: string): boolean {
-    const regexp = /^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}$/;
-    return ipAddr === undefined || ipAddr === '' || regexp.test(ipAddr);
-  }
-
-  function isPortValid(portNumber?: number): boolean {
-    return (
-      portNumber === undefined ||
-      (!Number.isNaN(portNumber) &&
-        Number.isSafeInteger(portNumber) &&
-        portNumber > 0 &&
-        portNumber <= 65535)
-    );
-  }
 
   // --- 이벤트 핸들러 ---
   async function attach(event: Event) {
@@ -239,35 +216,15 @@
   async function applyAndRestart(event: Event) {
     event.preventDefault();
 
-    const ipAddr = ipAddress.trim() === '' ? undefined : ipAddress.trim();
-    if (!isIpValid(ipAddr)) {
-      toast.error('IP 주소 형식이 올바르지 않습니다. (예: 127.0.0.1)');
-      return;
-    }
-
-    const isPortEmpty =
-      port === null || port === undefined || String(port).trim() === '';
-
-    // 2. 포트 번호 변환 (비었으면 undefined, 아니면 숫자로)
-    const portNumber = isPortEmpty ? undefined : Number(port);
-
-    // 3. 유효성 검사 (비어있지 않은데 유효하지 않은 숫자라면 에러)
-    if (!isPortEmpty && !isPortValid(portNumber)) {
-      toast.error('포트 번호가 올바르지 않습니다. (1 ~ 65535 사이의 숫자)');
-      return;
-    }
-
-    // 설정 저장 및 서버 재시작 로직
     const handler = async () => {
-      // write_config 호출 시 useSecureConnection 값 포함
       await invoke('write_config', {
-        ip: ipAddr,
-        port: portNumber,
-        useSecureConnection: null, // 보안 연결 설정 저장
+        ip: null,
+        port: null,
+        useSecureConnection: null,
         autoAttachEnabled: autoAttachEnabled,
         startInTray: startInTray,
       });
-      await invoke('restart_server'); // 이 호출 후 백엔드가 상태 변경 이벤트를 보내야 함
+      await invoke('restart_server');
     };
 
     toast.promise(handler(), {
@@ -443,39 +400,6 @@
               현재 보고된 트래커 오류 없음
             </div>
           {/if}
-
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div class="space-y-1.5">
-              <Label for="ip">IP 주소 (기본값: 127.0.0.1)</Label>
-              <Input
-                id="ip"
-                type="text"
-                bind:value={ipAddress}
-                placeholder="127.0.0.1"
-              />
-              {#if ipAddress.trim() !== '' && !isIpValid(ipAddress)}
-                <p class="text-xs text-destructive">
-                  올바른 IPv4 주소 형식이 아닙니다.
-                </p>
-              {/if}
-            </div>
-            <div class="space-y-1.5">
-              <Label for="port">포트 (기본값: 46821)</Label>
-              <Input
-                id="port"
-                type="number"
-                bind:value={port}
-                placeholder="46821"
-                min="1"
-                max="65535"
-              />
-              {#if port !== null && port !== undefined && String(port).trim() !== '' && !isPortValid(Number(port))}
-                <p class="text-xs text-destructive">
-                  1 ~ 65535 사이의 숫자를 입력하세요.
-                </p>
-              {/if}
-            </div>
-          </div>
 
           <!-- <div class="flex items-center space-x-2 pt-3">
           <Checkbox id="secure-connection" bind:checked={useSecureConnection} />
