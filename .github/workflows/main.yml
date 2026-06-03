@@ -18,6 +18,10 @@ jobs:
         include:
           - platform: "windows-latest"
             args: ""
+            rust-targets: ""
+          - platform: "macos-latest"
+            args: "--target universal-apple-darwin"
+            rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -30,6 +34,8 @@ jobs:
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
 
       # - name: install dependencies (ubuntu only)
       #   if: matrix.platform == 'ubuntu-22.04' # This must match the platform value defined above.
@@ -51,7 +57,19 @@ jobs:
         with:
           tagName: v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
           releaseName: "App v__VERSION__"
-          releaseBody: "See the assets to download this version and install."
+          releaseBody: |
+            ## 설치 방법
+
+            ### Windows
+            `.exe` 또는 `.msi` 파일을 다운로드하여 실행하세요.
+
+            ### macOS
+            `.dmg` 파일을 다운로드한 후 앱을 Applications에 드래그하세요.
+
+            > **⚠️ macOS 보안 경고 해제**
+            > 미서명 앱이므로 처음 실행 시 차단될 수 있습니다.
+            > 1. 앱을 우클릭 → **열기** → **열기** 클릭
+            > 2. 또는 **시스템 설정 → 개인 정보 보호 및 보안 → 확인 없이 열기**
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
