@@ -12,22 +12,6 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[repr(C)]
-#[derive(Copy, Clone, serde::Serialize)]
-pub struct FVector {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, serde::Serialize)]
-pub struct FRotator {
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
-}
-
-#[repr(C)]
 #[derive(Copy, Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct PlayerInfo {
     pub x: f32,
@@ -132,7 +116,7 @@ pub enum ManagedPeer {
 #[derive(Debug)]
 pub enum WsRouteInfo {
     External,
-    Local(mpsc::Sender<String>),
+    Local(mpsc::Sender<RtcSignal>),
 }
 
 #[derive(Debug)]

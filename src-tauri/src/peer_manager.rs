@@ -62,7 +62,7 @@ impl PeerManager {
     pub async fn handle_new_local_client(&mut self, client_id: String) -> Result<()> {
         self.peers.insert(client_id.clone(), ManagedPeer::Local);
         let signal = SignalPacket {
-            from: "SERVER_ID".to_string(),
+            from: SERVER_ID.to_string(),
             to: client_id.clone(),
             msg: RtcSignal::LocalOffer,
         };
@@ -104,7 +104,7 @@ impl PeerManager {
                         // to_json은 async 함수
                         Ok(candidate_init) => {
                             let signal = SignalPacket {
-                                from: "SERVER_ID".to_string(),
+                                from: SERVER_ID.to_string(),
                                 to: client_id.clone(),
                                 msg: RtcSignal::IceCandidate(candidate_init),
                             };

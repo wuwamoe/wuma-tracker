@@ -8,6 +8,8 @@ pub trait ProcessBackend {
     fn is_alive(&self) -> bool;
     fn read_bytes(&self, address: u64, buffer: &mut [u8]) -> Result<(), NativeError>;
     fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError>;
+    fn rescan_gworld(&mut self) {}
+
     fn active_offset_name(&self, offset: &WuwaOffset) -> String {
         offset.name.clone()
     }

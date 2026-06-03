@@ -19,12 +19,13 @@ use crate::offsets::WuwaOffset;
 use crate::rtc_supervisor::RtcSupervisor;
 use crate::types::SupervisorCommand;
 use tauri::{
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, Manager, WindowEvent,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_notification::NotificationExt;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 use types::{GlobalState, LocalStorageConfig};
 use util::get_config;
 #[cfg(all(feature = "store", windows))]
@@ -37,7 +38,7 @@ const GAME_PROCESS_NAME: &str = "Client-Mac-Shipping";
 
 struct TauriState {
     supervisor_tx: mpsc::Sender<SupervisorCommand>,
-    global_state: Arc<Mutex<GlobalState>>,
+    global_state: watch::Sender<GlobalState>,
     offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 }
 
@@ -121,26 +122,17 @@ async fn restart_external_signaling_client(app_handle: AppHandle) -> Result<Stri
 
 #[tauri::command]
 async fn channel_get_config(app_handle: AppHandle) -> Result<LocalStorageConfig, String> {
-    return match get_config(app_handle).await {
-        Ok(config) => Ok(config),
-        Err(e) => Err(e.to_string()),
-    };
+    get_config(app_handle).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn channel_get_global_state(app_handle: AppHandle) -> Result<GlobalState, String> {
-    return match util::get_global_state(app_handle).await {
-        Ok(gs) => Ok(gs),
-        Err(e) => Err(e.to_string()),
-    };
+fn channel_get_global_state(app_handle: AppHandle) -> GlobalState {
+    util::get_global_state(&app_handle)
 }
 
 #[tauri::command]
-async fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) -> Result<(), String> {
-    return match util::set_global_state(app_handle, value).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e.to_string()),
-    };
+fn channel_set_global_state(app_handle: AppHandle, value: GlobalState) {
+    util::set_global_state(&app_handle, value);
 }
 
 #[cfg(all(feature = "store", windows))]
@@ -199,13 +191,17 @@ pub async fn run() {
                 .set_focus();
         }));
     }
+
     let mut rtc_supervisor = RtcSupervisor::new(offsets_for_supervisor);
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let shutdown_token = CancellationToken::new();
+    let supervisor_token = shutdown_token.clone();
     let (supervisor_tx, supervisor_rx) = mpsc::channel(32);
+    let (global_state_tx, _) = watch::channel(GlobalState::default());
+
     let app = builder
         .manage(TauriState {
             supervisor_tx,
-            global_state: Arc::new(Mutex::new(GlobalState::default())),
+            global_state: global_state_tx,
             offsets: offsets_shared,
         })
         .plugin(tauri_plugin_dialog::init())
@@ -219,6 +215,16 @@ pub async fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // GlobalState 변경을 감지해 프론트엔드로 emit하는 백그라운드 태스크
+            let mut state_rx = app.state::<TauriState>().global_state.subscribe();
+            let emit_handle = app.handle().clone();
+            tokio::spawn(async move {
+                while state_rx.changed().await.is_ok() {
+                    let state = state_rx.borrow_and_update().clone();
+                    let _ = emit_handle.emit("handle-global-state-change", state);
+                }
+            });
+
             let handle = app.handle().clone();
             tokio::spawn(async move {
                 offset_manager::start_offset_loading(handle, offsets_for_setup).await;
@@ -275,23 +281,20 @@ pub async fn run() {
             tokio::spawn(async move {
                 let config = get_config(handle.clone()).await.unwrap_or_default();
 
-                // 트레이 시작 설정
                 let start_in_tray = config.start_in_tray.unwrap_or(false);
                 if !start_in_tray {
                     if let Some(window) = handle.get_webview_window("main") {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
-                } else {
-                    if let Err(e) = handle
-                        .notification()
-                        .builder()
-                        .title("명조 맵스 트래커")
-                        .body("프로그램이 시스템 트레이에서 실행 중입니다.")
-                        .show()
-                    {
-                        log::error!("알림 발송 실패: {}", e);
-                    }
+                } else if let Err(e) = handle
+                    .notification()
+                    .builder()
+                    .title("명조 맵스 트래커")
+                    .body("프로그램이 시스템 트레이에서 실행 중입니다.")
+                    .show()
+                {
+                    log::error!("알림 발송 실패: {}", e);
                 }
 
                 rtc_supervisor
@@ -300,7 +303,7 @@ pub async fn run() {
                         config.ip.unwrap_or(String::from("127.0.0.1")),
                         config.port.unwrap_or(46821),
                         supervisor_rx,
-                        shutdown_rx,
+                        supervisor_token,
                     )
                     .await
             });
@@ -333,6 +336,6 @@ pub async fn run() {
     app.run_return(|_app_handle, _event| {});
 
     println!("Tauri app window closed. Starting final cleanup...");
-    let _ = shutdown_tx.send(());
+    shutdown_token.cancel();
     println!("Cleanup complete. Exiting process.");
 }

@@ -13,12 +13,18 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
+
+// 500ms 루프 기준 60회 = 30초
+const MAX_GWORLD_RESCAN_FAILURES: u32 = 60;
 
 /// OS별 게임 프로세스 래퍼
 pub struct NativeCollector {
     proc: PlatformProc,
     offset: Option<WuwaOffset>,
+    consecutive_failures: u32,
+    rescan_done: bool,
 }
 
 impl NativeCollector {
@@ -26,7 +32,7 @@ impl NativeCollector {
         let proc_name = proc_name.to_string();
         let proc =
             tokio::task::spawn_blocking(move || PlatformProc::new(&proc_name, cache_dir)).await??;
-        Ok(Self { proc, offset: None })
+        Ok(Self { proc, offset: None, consecutive_failures: 0, rescan_done: false })
     }
 
     fn get_location(
@@ -39,7 +45,22 @@ impl NativeCollector {
             });
         };
 
-        select_player_info(&self.proc, &mut self.offset, variants)
+        match select_player_info(&self.proc, &mut self.offset, variants) {
+            Ok(info) => {
+                self.consecutive_failures = 0;
+                Ok(info)
+            }
+            Err(e) => {
+                self.consecutive_failures += 1;
+                if self.consecutive_failures >= MAX_GWORLD_RESCAN_FAILURES && !self.rescan_done {
+                    log::info!("{}회 연속 실패 → GWorld 재스캔", MAX_GWORLD_RESCAN_FAILURES);
+                    self.proc.rescan_gworld();
+                    self.rescan_done = true;
+                    self.offset = None;
+                }
+                Err(e)
+            }
+        }
     }
 
     fn get_active_offset_name(&self) -> Option<String> {
@@ -52,7 +73,7 @@ impl NativeCollector {
 pub async fn collection_loop(
     collector_arc: Arc<Mutex<Option<NativeCollector>>>,
     pm_tx: mpsc::Sender<CollectorMessage>,
-    mut shutdown_rx: oneshot::Receiver<()>,
+    cancel: CancellationToken,
     offsets_arc: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
 ) {
     let mut reported_offset: Option<String> = None;
@@ -128,12 +149,10 @@ pub async fn collection_loop(
         }
         // Sleep Phase
         tokio::select! {
-            // 외부(PeerManager)로부터의 종료 신호 처리
-            _ = &mut shutdown_rx => {
+            _ = cancel.cancelled() => {
                 log::info!("Collection loop exiting: exit signal received");
                 break;
             }
-
             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
         }
     }

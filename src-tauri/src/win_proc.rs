@@ -67,6 +67,7 @@ pub struct WinProc {
     pub base_addr: u64,
     handle: HANDLE,
     gworld_rva: u64,
+    cache_dir: PathBuf,
 }
 
 impl WinProc {
@@ -116,7 +117,7 @@ impl WinProc {
                 if gworld_rva != 0 { format!("{:X}", gworld_rva) } else { "폴백".to_string() }
             );
 
-            Ok(WinProc { pid, base_addr, handle, gworld_rva })
+            Ok(WinProc { pid, base_addr, handle, gworld_rva, cache_dir })
         }
     }
 
@@ -182,6 +183,35 @@ impl ProcessBackend for WinProc {
                         address, bytes_read, buffer.len()
                     ),
                 })
+            }
+        }
+    }
+
+    fn rescan_gworld(&mut self) {
+        match scan_gworld_rva(self.handle, self.base_addr) {
+            Ok(rva) => {
+                log::info!("GWorld 재스캔 성공: RVA 0x{:X}", rva);
+                self.gworld_rva = rva;
+                // 캐시 갱신
+                if let Ok((timestamp, size_of_image, _, _)) =
+                    read_pe_exception_dir(self.handle, self.base_addr)
+                {
+                    let exe_path = get_module_path(self.handle).unwrap_or_default();
+                    let cache_path = self.cache_dir.join(CACHE_FILE);
+                    let mut cache = load_cache(&cache_path);
+                    cache.entries.retain(|e| e.exe_path != exe_path);
+                    cache.entries.push(GworldScanCacheEntry {
+                        exe_path,
+                        pe_timestamp: timestamp,
+                        size_of_image,
+                        gworld_rva: rva,
+                    });
+                    save_cache(&cache_path, &cache);
+                }
+            }
+            Err(e) => {
+                log::warn!("GWorld 재스캔 실패, 폴백 유지: {}", e);
+                self.gworld_rva = 0;
             }
         }
     }

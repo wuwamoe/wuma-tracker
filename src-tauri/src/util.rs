@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::fs::{create_dir_all, read_to_string, write};
 
 use crate::{
@@ -39,43 +39,14 @@ async fn get_config_file(app_handle: AppHandle) -> Result<PathBuf> {
     Ok(res.join("config.json"))
 }
 
-pub async fn get_global_state(app_handle: AppHandle) -> Result<GlobalState> {
-    let app_state = app_handle.state::<TauriState>();
-    let global_state_lock = app_state.global_state.lock().await;
-    let global_state = global_state_lock.clone();
-    Ok(global_state)
+pub fn get_global_state(app_handle: &AppHandle) -> GlobalState {
+    app_handle.state::<TauriState>().global_state.borrow().clone()
 }
 
-pub async fn set_global_state(app_handle: AppHandle, value: GlobalState) -> Result<()> {
-    let app_state = app_handle.state::<TauriState>();
-    let mut guard = app_state.global_state.lock().await;
-    if guard.clone() == value {
-        return Ok(());
-    }
-
-    *guard = value.clone();
-    let _ = app_handle
-        .emit("handle-global-state-change", value)
-        .context("Failed to emit event on global state change");
-
-    Ok(())
+pub fn set_global_state(app_handle: &AppHandle, value: GlobalState) {
+    let _ = app_handle.state::<TauriState>().global_state.send(value);
 }
 
-pub async fn mutate_global_state(
-    app_handle: AppHandle,
-    mutation: impl Fn(GlobalState) -> GlobalState,
-) -> Result<()> {
-    let app_state = app_handle.state::<TauriState>();
-    let mut guard = app_state.global_state.lock().await;
-    let new_value = mutation(guard.clone());
-    if guard.clone() == new_value {
-        return Ok(());
-    }
-
-    *guard = new_value.clone();
-    let _ = app_handle
-        .emit("handle-global-state-change", new_value)
-        .context("Failed to emit event on global state change");
-
-    Ok(())
+pub fn mutate_global_state(app_handle: &AppHandle, f: impl FnOnce(&mut GlobalState)) {
+    app_handle.state::<TauriState>().global_state.send_modify(f);
 }
