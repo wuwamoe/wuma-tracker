@@ -1,5 +1,5 @@
 use crate::native_collector::{NativeCollector, collection_loop};
-use crate::offsets::WuwaOffset;
+use crate::offsets::TrackerConfig;
 use crate::peer_manager::PeerManager;
 use crate::room_code_generator::generate_room_code_base36;
 use crate::signaling_handler::SignalingHandler;
@@ -20,13 +20,13 @@ pub struct RtcSupervisor {
     signaling_handler: SignalingHandler,
     peer_manager: PeerManager,
     collector_state: CollectorState,
-    offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
+    offsets: Arc<Mutex<Option<TrackerConfig>>>,
     sh_pm_rx: mpsc::Receiver<SignalPacket>,
     collector_rx: mpsc::Receiver<CollectorMessage>,
 }
 
 impl RtcSupervisor {
-    pub fn new(offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>) -> Self {
+    pub fn new(offsets: Arc<Mutex<Option<TrackerConfig>>>) -> Self {
         let (sh_pm_tx, sh_pm_rx) = mpsc::channel(128);
         let (pm_sh_tx, pm_sh_rx) = mpsc::channel(128);
         let (_collector_tx, collector_rx) = mpsc::channel(128);
@@ -186,7 +186,11 @@ impl RtcSupervisor {
             .app_config_dir()
             .map_err(|e| e.to_string())?;
 
-        match NativeCollector::new(proc_name, cache_dir).await {
+        let scan_config = self.offsets.lock().await
+            .as_ref()
+            .map(|c| c.gworld_scan.clone());
+
+        match NativeCollector::new(proc_name, cache_dir, scan_config).await {
             Ok(collector) => {
                 *self.collector_state.instance.lock().await = Some(collector);
                 log::info!("Process attached successfully.");

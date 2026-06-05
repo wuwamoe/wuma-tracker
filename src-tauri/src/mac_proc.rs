@@ -106,7 +106,7 @@ struct DyldImageInfo {
 }
 
 impl MacProc {
-    pub fn new(name: &str, cache_dir: PathBuf) -> Result<Self> {
+    pub fn new(name: &str, cache_dir: PathBuf, _scan_config: Option<crate::offsets::GWorldScanConfig>) -> Result<Self> {
         let pid = Self::find_pid_by_name(name)
             .with_context(|| "게임이 실행 중이 아닙니다.".to_string())?;
         let task = MachTaskPort::open(pid)?;

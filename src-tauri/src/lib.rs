@@ -15,7 +15,7 @@ mod win_proc;
 
 use std::sync::Arc;
 
-use crate::offsets::WuwaOffset;
+use crate::offsets::TrackerConfig;
 use crate::rtc_supervisor::RtcSupervisor;
 use crate::types::SupervisorCommand;
 use tauri::{
@@ -39,7 +39,7 @@ const GAME_PROCESS_NAME: &str = "Client-Mac-Shipping";
 struct TauriState {
     supervisor_tx: mpsc::Sender<SupervisorCommand>,
     global_state: watch::Sender<GlobalState>,
-    offsets: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
+    offsets: Arc<Mutex<Option<TrackerConfig>>>,
 }
 
 #[tauri::command]

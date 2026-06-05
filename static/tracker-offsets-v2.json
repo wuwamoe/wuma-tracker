@@ -1,0 +1,22 @@
+{
+  "last_updated": "2026-06-05",
+  "gworld_scan": {
+    "enabled": true,
+    "prefix": "48 8B 1D",
+    "suffix": "48 85 DB 74 ?? 41 B0 01"
+  },
+  "offsets": [
+    {
+      "name": "v3.4.0+",
+      "global_gworld": 153666328,
+      "uworld_persistentlevel": 56,
+      "uworld_owninggameinstance": 440,
+      "ulevel_lastworldorigin": 200,
+      "ugameinstance_localplayers": 64,
+      "uplayer_playercontroller": 56,
+      "aplayercontroller_acknowlegedpawn": 832,
+      "aactor_rootcomponent": 416,
+      "uscenecomponent_componenttoworld": 480
+    }
+  ]
+}

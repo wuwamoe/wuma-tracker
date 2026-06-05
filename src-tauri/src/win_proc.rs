@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::{ffi::CStr, fs, mem, ptr::null_mut};
 
-use crate::offsets::WuwaOffset;
+use crate::offsets::{GWorldScanConfig, WuwaOffset};
 use crate::process_backend::ProcessBackend;
 use crate::types::NativeError;
 use crate::types::NativeError::{PointerChainError, ValueReadError};
@@ -25,25 +25,27 @@ use winapi::{
     },
 };
 
-// ── GWorld 패턴 ───────────────────────────────────────────────────────────────
-//   MOV  RBX, [RIP+?] 48 8B 1D ?? ?? ?? ??
-//   TEST RBX, RBX     48 85 DB
-//   JZ   +??          74 ??   (오프셋은 버전마다 다를 수 있으므로 wildcard)
-//   MOV  R8B, 1       41 B0 01
-//
-// disp32는 오프셋 3에 위치, MOV 명령어 길이 = 7바이트
-const GWORLD_PREFIX: [u8; 3] = [0x48, 0x8B, 0x1D];
-const GWORLD_SUFFIX: [u8; 3] = [0x48, 0x85, 0xDB]; // TEST RBX, RBX
-const GWORLD_TAIL: [u8; 3] = [0x41, 0xB0, 0x01];   // MOV R8B, 1
-// 패턴 구조: PREFIX(3) + disp32(4) + SUFFIX(3) + JZ_op(1) + JZ_rel(1) + TAIL(3) = 15바이트
-const PATTERN_INSTR_LEN: usize = 7;  // MOV RBX, [RIP+disp] 길이
-const PATTERN_TOTAL_LEN: usize = 15; // 전체 매칭 길이
-
 // .pdata 스캔 배치 파라미터
-const BATCH_GAP: u64 = 4096;           // 이 이상 VA 갭이 나면 새 배치
-const MAX_BATCH_SIZE: usize = 256 * 1024; // 배치당 최대 읽기 크기
+const BATCH_GAP: u64 = 4096;
+const MAX_BATCH_SIZE: usize = 256 * 1024;
 
 const CACHE_FILE: &str = "win_gworld_scan_cache.json";
+
+// ── 패턴 파싱 ─────────────────────────────────────────────────────────────────
+
+/// "48 8B 1D" → [0x48, 0x8B, 0x1D]
+fn parse_prefix(s: &str) -> Vec<u8> {
+    s.split_whitespace()
+        .filter_map(|b| u8::from_str_radix(b, 16).ok())
+        .collect()
+}
+
+/// "48 85 DB 74 ?? 41 B0 01" → [Some(0x48), Some(0x85), Some(0xDB), None, Some(0x41), ...]
+fn parse_suffix(s: &str) -> Vec<Option<u8>> {
+    s.split_whitespace()
+        .map(|b| if b == "??" { None } else { u8::from_str_radix(b, 16).ok() })
+        .collect()
+}
 
 // ── 캐시 구조체 ───────────────────────────────────────────────────────────────
 
@@ -68,10 +70,12 @@ pub struct WinProc {
     handle: HANDLE,
     gworld_rva: u64,
     cache_dir: PathBuf,
+    scan_config: GWorldScanConfig,
 }
 
 impl WinProc {
-    pub fn new(name: &str, cache_dir: PathBuf) -> Result<Self> {
+    pub fn new(name: &str, cache_dir: PathBuf, scan_config: Option<GWorldScanConfig>) -> Result<Self> {
+        let scan_config = scan_config.unwrap_or_default();
         unsafe {
             let pid = Self::find_pid_by_name(name)
                 .with_context(|| "게임이 실행 중이 아닙니다.".to_string())?;
@@ -103,12 +107,19 @@ impl WinProc {
 
             let base_addr = h_mod as u64;
 
-            let gworld_rva = match find_gworld_rva_with_cache(handle, base_addr, &cache_dir) {
-                Ok(rva) => rva,
-                Err(e) => {
-                    log::warn!("GWorld 스캔 실패, 오프셋 폴백 사용: {}", e);
-                    0
+            let gworld_rva = if scan_config.enabled {
+                let prefix = parse_prefix(&scan_config.prefix);
+                let suffix = parse_suffix(&scan_config.suffix);
+                match find_gworld_rva_with_cache(handle, base_addr, &cache_dir, &prefix, &suffix) {
+                    Ok(rva) => rva,
+                    Err(e) => {
+                        log::warn!("GWorld 스캔 실패, 오프셋 폴백 사용: {}", e);
+                        0
+                    }
                 }
+            } else {
+                log::info!("GWorld 자동 탐색 비활성화됨 (원격 설정), 오프셋 폴백 사용");
+                0
             };
 
             log::info!(
@@ -117,7 +128,7 @@ impl WinProc {
                 if gworld_rva != 0 { format!("{:X}", gworld_rva) } else { "폴백".to_string() }
             );
 
-            Ok(WinProc { pid, base_addr, handle, gworld_rva, cache_dir })
+            Ok(WinProc { pid, base_addr, handle, gworld_rva, cache_dir, scan_config })
         }
     }
 
@@ -200,11 +211,16 @@ impl ProcessBackend for WinProc {
     }
 
     fn rescan_gworld(&mut self) {
-        match scan_gworld_rva(self.handle, self.base_addr) {
+        if !self.scan_config.enabled {
+            log::info!("GWorld 재스캔 스킵 (원격 설정으로 비활성화됨)");
+            return;
+        }
+        let prefix = parse_prefix(&self.scan_config.prefix);
+        let suffix = parse_suffix(&self.scan_config.suffix);
+        match scan_gworld_rva(self.handle, self.base_addr, &prefix, &suffix) {
             Ok(rva) => {
                 log::info!("GWorld 재스캔 성공: RVA 0x{:X}", rva);
                 self.gworld_rva = rva;
-                // 캐시 갱신
                 if let Ok((timestamp, size_of_image, _, _)) =
                     read_pe_exception_dir(self.handle, self.base_addr)
                 {
@@ -269,26 +285,15 @@ fn rpm_buf(handle: HANDLE, addr: u64, buf: &mut [u8]) -> bool {
     }
 }
 
-/// PE Optional Header 파싱 → (pe_timestamp, size_of_image, pdata_rva, pdata_size)
 fn read_pe_exception_dir(handle: HANDLE, base: u64) -> Result<(u32, u32, u32, u32)> {
-    // DOS header: e_lfanew at +0x3C
     let e_lfanew = rpm_u32(handle, base + 0x3C).context("e_lfanew 읽기 실패")? as u64;
     let pe = base + e_lfanew;
-
-    // IMAGE_FILE_HEADER.TimeDateStamp: PE sig(4) + Machine(2) + NumberOfSections(2) = +8
     let timestamp = rpm_u32(handle, pe + 8).context("TimeDateStamp 읽기 실패")?;
-
-    // IMAGE_OPTIONAL_HEADER64: PE sig(4) + FILE_HEADER(20) = +24
     let opt = pe + 24;
-
-    // SizeOfImage: OptionalHeader+56
     let size_of_image = rpm_u32(handle, opt + 56).context("SizeOfImage 읽기 실패")?;
-
-    // DataDirectory[3] (EXCEPTION = .pdata): OptionalHeader+112 + 3*8
     let dd = opt + 112 + 24;
     let pdata_rva = rpm_u32(handle, dd).context(".pdata RVA 읽기 실패")?;
     let pdata_size = rpm_u32(handle, dd + 4).context(".pdata size 읽기 실패")?;
-
     Ok((timestamp, size_of_image, pdata_rva, pdata_size))
 }
 
@@ -305,14 +310,13 @@ fn get_module_path(handle: HANDLE) -> Result<String> {
 
 // ── .pdata 기반 GWorld RVA 스캔 ───────────────────────────────────────────────
 
-fn scan_gworld_rva(handle: HANDLE, base: u64) -> Result<u64> {
+fn scan_gworld_rva(handle: HANDLE, base: u64, prefix: &[u8], suffix: &[Option<u8>]) -> Result<u64> {
     let (_, size_of_image, pdata_rva, pdata_size) = read_pe_exception_dir(handle, base)?;
 
     if pdata_rva == 0 || pdata_size < 12 {
         bail!(".pdata 섹션을 찾지 못했습니다.");
     }
 
-    // .pdata 전체 읽기 (RUNTIME_FUNCTION: BeginAddress(4) + EndAddress(4) + UnwindInfo(4))
     let entry_count = pdata_size as usize / 12;
     let mut pdata = vec![0u8; entry_count * 12];
     if !rpm_buf(handle, base + pdata_rva as u64, &mut pdata) {
@@ -321,7 +325,9 @@ fn scan_gworld_rva(handle: HANDLE, base: u64) -> Result<u64> {
 
     log::info!("GWorld 스캔: .pdata 함수 {} 개", entry_count);
 
-    // (BeginAddress, EndAddress) 추출 (유효 범위만)
+    let instr_len = prefix.len() + 4; // prefix + disp32
+    let pattern_total = instr_len + suffix.len();
+
     let mut funcs: Vec<(u32, u32)> = (0..entry_count)
         .map(|i| {
             let b = u32::from_le_bytes(pdata[i * 12..i * 12 + 4].try_into().unwrap());
@@ -332,8 +338,6 @@ fn scan_gworld_rva(handle: HANDLE, base: u64) -> Result<u64> {
         .collect();
     funcs.sort_unstable_by_key(|&(b, _)| b);
 
-    // 인접 함수들을 배치로 묶어 ReadProcessMemory 최소화
-    // 패턴은 함수 body 어디에나 있을 수 있으므로 EndAddress까지 읽음
     let mut i = 0;
     while i < funcs.len() {
         let batch_start = funcs[i].0 as u64;
@@ -354,26 +358,27 @@ fn scan_gworld_rva(handle: HANDLE, base: u64) -> Result<u64> {
         let mut buf = vec![0u8; read_size];
 
         if rpm_buf(handle, base + batch_start, &mut buf) {
-            // 배치 내 모든 바이트에서 패턴 탐색
-            let search_end = buf.len().saturating_sub(PATTERN_TOTAL_LEN - 1);
-            for off in 0..search_end {
-                if buf[off..off + 3] != GWORLD_PREFIX {
+            let search_end = buf.len().saturating_sub(pattern_total - 1);
+            'search: for off in 0..search_end {
+                // prefix 매칭
+                if buf[off..off + prefix.len()] != *prefix {
                     continue;
                 }
-                if buf[off + 7..off + 10] != GWORLD_SUFFIX {
-                    continue;
-                }
-                if buf[off + 10] != 0x74 {
-                    continue;
-                }
-                if buf[off + 12..off + 15] != GWORLD_TAIL {
-                    continue;
+                // suffix 매칭 (wildcard 지원)
+                let suf_start = off + instr_len;
+                for (k, &byte) in suffix.iter().enumerate() {
+                    if let Some(b) = byte {
+                        if buf[suf_start + k] != b {
+                            continue 'search;
+                        }
+                    }
                 }
 
-                let disp = i32::from_le_bytes(buf[off + 3..off + 7].try_into().unwrap());
+                let disp = i32::from_le_bytes(
+                    buf[off + prefix.len()..off + prefix.len() + 4].try_into().unwrap()
+                );
                 let instr_rva = batch_start + off as u64;
-                let gworld_rva =
-                    ((instr_rva as i64) + PATTERN_INSTR_LEN as i64 + disp as i64) as u64;
+                let gworld_rva = ((instr_rva as i64) + instr_len as i64 + disp as i64) as u64;
 
                 if gworld_rva > 0 && gworld_rva < size_of_image as u64 {
                     log::info!(
@@ -409,7 +414,13 @@ fn save_cache(path: &Path, cache: &GworldScanCache) {
     }
 }
 
-fn find_gworld_rva_with_cache(handle: HANDLE, base: u64, cache_dir: &Path) -> Result<u64> {
+fn find_gworld_rva_with_cache(
+    handle: HANDLE,
+    base: u64,
+    cache_dir: &Path,
+    prefix: &[u8],
+    suffix: &[Option<u8>],
+) -> Result<u64> {
     let exe_path = get_module_path(handle).unwrap_or_default();
     let (timestamp, size_of_image, _, _) = read_pe_exception_dir(handle, base)?;
 
@@ -426,7 +437,7 @@ fn find_gworld_rva_with_cache(handle: HANDLE, base: u64, cache_dir: &Path) -> Re
     }
 
     log::info!("GWorld RVA 캐시 미스 → .pdata 스캔 시작");
-    let gworld_rva = scan_gworld_rva(handle, base)?;
+    let gworld_rva = scan_gworld_rva(handle, base, prefix, suffix)?;
 
     cache.entries.retain(|e| e.exe_path != exe_path);
     cache.entries.push(GworldScanCacheEntry {

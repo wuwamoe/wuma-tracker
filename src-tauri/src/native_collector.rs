@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 use crate::mac_proc::MacProc as PlatformProc;
-use crate::offsets::WuwaOffset;
+use crate::offsets::{GWorldScanConfig, TrackerConfig, WuwaOffset};
 use crate::process_backend::{ProcessBackend, select_player_info};
 use crate::types::NativeError::PointerChainError;
 use crate::types::{CollectorMessage, NativeError};
@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 // 재스캔 스케줄 (500ms 루프 기준 실패 횟수)
 // gworld_ready=false(ACE 미복호화): 5초 → 30초 → 60초
 // gworld_ready=true(정상, 일시적 오류):          30초 → 60초
-const RESCAN_SCHEDULE_COLD: &[u32] = &[10, 60, 120];
-const RESCAN_SCHEDULE_WARM: &[u32] = &[60, 120];
+const RESCAN_SCHEDULE_COLD: &[u32] = &[10, 120, 240];
+const RESCAN_SCHEDULE_WARM: &[u32] = &[120, 240];
 
 /// OS별 게임 프로세스 래퍼
 pub struct NativeCollector {
@@ -32,10 +32,10 @@ pub struct NativeCollector {
 }
 
 impl NativeCollector {
-    pub async fn new(proc_name: &str, cache_dir: PathBuf) -> Result<Self> {
+    pub async fn new(proc_name: &str, cache_dir: PathBuf, scan_config: Option<GWorldScanConfig>) -> Result<Self> {
         let proc_name = proc_name.to_string();
         let proc =
-            tokio::task::spawn_blocking(move || PlatformProc::new(&proc_name, cache_dir)).await??;
+            tokio::task::spawn_blocking(move || PlatformProc::new(&proc_name, cache_dir, scan_config)).await??;
         let cold_start = !proc.gworld_ready();
         Ok(Self { proc, offset: None, consecutive_failures: 0, rescan_stage: 0, cold_start })
     }
@@ -83,12 +83,14 @@ pub async fn collection_loop(
     collector_arc: Arc<Mutex<Option<NativeCollector>>>,
     pm_tx: mpsc::Sender<CollectorMessage>,
     cancel: CancellationToken,
-    offsets_arc: Arc<Mutex<Option<Vec<WuwaOffset>>>>,
+    offsets_arc: Arc<Mutex<Option<TrackerConfig>>>,
 ) {
     let mut reported_offset: Option<String> = None;
     let mut last_error_emit: Option<Instant> = None;
     loop {
-        let offsets_snapshot = offsets_arc.lock().await.clone();
+        let offsets_snapshot: Option<Vec<WuwaOffset>> = offsets_arc.lock().await
+            .as_ref()
+            .map(|c| c.offsets.clone());
         let result = {
             // 1. 상태 관리자를 잠그고 공유 상태에 접근합니다.
             let mut collector_opt_guard = collector_arc.lock().await;
