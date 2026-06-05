@@ -20,6 +20,9 @@ use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
+const PING_INTERVAL_SECS: u64 = 15;
+pub(crate) const MAX_RECONNECT_ATTEMPTS: u32 = 3;
+
 pub(crate) struct SignalingHandler {
     server_cancel: Option<CancellationToken>,
     sh_pm_tx: Arc<mpsc::Sender<SignalPacket>>,
@@ -111,10 +114,17 @@ impl SignalingHandler {
         Ok(addr)
     }
 
-    pub async fn connect_to_external_server(&self, app_handle: AppHandle, url: String) -> Result<(), String> {
+    pub async fn connect_to_external_server(
+        &self,
+        app_handle: AppHandle,
+        url: String,
+        attempt: u32,
+        reconnect_tx: mpsc::Sender<(String, u32)>,
+    ) -> Result<(), String> {
         let mut external_session_guard = self.external_session.lock().await;
         if let Some(old_session) = external_session_guard.take() {
             log::info!("Shutting down previous external connection session...");
+            old_session.cancel.cancel();
             old_session.shutdown_handle.abort();
         }
 
@@ -125,78 +135,103 @@ impl SignalingHandler {
         log::info!("Successfully connected to external signaling server: {}", url);
 
         let (ws_sender, mut ws_receiver) = ws_stream.split();
-
         let (unbounded_tx, unbounded_rx) = futures_mpsc::unbounded();
         let write_task = tokio::spawn(unbounded_rx.map(Ok).forward(ws_sender));
 
         let sh_pm_tx = self.sh_pm_tx.clone();
         let switching_table = self.switching_table.clone();
-        let read_tx = unbounded_tx.clone();
+        let ping_tx = unbounded_tx.clone();
+
         let read_task = tokio::spawn(async move {
+            let mut pong_pending = false;
             loop {
-                match timeout(Duration::from_secs(30), ws_receiver.next()).await {
+                match timeout(Duration::from_secs(PING_INTERVAL_SECS), ws_receiver.next()).await {
                     Err(_) => {
-                        log::info!("[External] Connection idle for 30s, sending Ping.");
-                        if read_tx.unbounded_send(TungsteniteMessage::Ping(vec![].into())).is_err() {
-                            log::error!("[External] Failed to send Ping: connection closed.");
+                        if pong_pending {
+                            log::warn!("[External] Pong 미수신 → 연결 끊김 감지");
                             break;
                         }
+                        log::info!("[External] {}초 비활성 → Ping 전송", PING_INTERVAL_SECS);
+                        if ping_tx.unbounded_send(TungsteniteMessage::Ping(vec![].into())).is_err() {
+                            log::error!("[External] Ping 전송 실패: 연결 종료");
+                            break;
+                        }
+                        pong_pending = true;
                     }
-                    Ok(Some(Ok(msg))) => match msg {
-                        TungsteniteMessage::Text(text) => {
-                            if let Ok(packet) = serde_json::from_str::<SignalPacket>(&text) {
-                                let client_id = packet.from.clone();
-                                match packet.msg {
-                                    RtcSignal::NewPeer => {
-                                        log::info!("[External] New peer '{}' registered in routing table.", client_id);
-                                        switching_table.lock().await.insert(client_id.clone(), WsRouteInfo::External);
+                    Ok(Some(Ok(msg))) => {
+                        pong_pending = false;
+                        match msg {
+                            TungsteniteMessage::Text(text) => {
+                                if let Ok(packet) = serde_json::from_str::<SignalPacket>(&text) {
+                                    let client_id = packet.from.clone();
+                                    match packet.msg {
+                                        RtcSignal::NewPeer => {
+                                            log::info!("[External] New peer '{}' registered.", client_id);
+                                            switching_table.lock().await.insert(client_id.clone(), WsRouteInfo::External);
+                                        }
+                                        RtcSignal::PeerLeft => {
+                                            log::info!("[External] Peer '{}' left.", client_id);
+                                            switching_table.lock().await.remove(&client_id);
+                                        }
+                                        _ => {}
                                     }
-                                    RtcSignal::PeerLeft => {
-                                        log::info!("[External] Peer '{}' removed from routing table.", client_id);
-                                        switching_table.lock().await.remove(&client_id);
+                                    if sh_pm_tx.send(packet).await.is_err() {
+                                        break;
                                     }
-                                    _ => {}
-                                }
-                                if sh_pm_tx.send(packet).await.is_err() {
-                                    break;
                                 }
                             }
+                            TungsteniteMessage::Pong(_) => {
+                                log::info!("[External] Pong 수신");
+                            }
+                            TungsteniteMessage::Close(_) => {
+                                log::info!("[External] 서버로부터 Close 수신");
+                                break;
+                            }
+                            _ => {}
                         }
-                        TungsteniteMessage::Pong(_) => {
-                            log::info!("[External] Received Pong from server.");
-                        }
-                        TungsteniteMessage::Close(_) => {
-                            log::info!("External WebSocket connection closed by remote. Terminating session.");
-                            util::mutate_global_state(&app_handle, |s| s.external_connection_code = None);
-                            break;
-                        }
-                        _ => {}
-                    },
+                    }
                     Ok(None) => {
-                        log::info!("External WebSocket stream ended. Terminating session.");
-                        util::mutate_global_state(&app_handle, |s| s.external_connection_code = None);
+                        log::info!("[External] 스트림 종료");
                         break;
                     }
                     Ok(Some(Err(e))) => {
-                        log::error!("Error reading from external WebSocket: {}. Terminating session.", e);
-                        util::mutate_global_state(&app_handle, |s| s.external_connection_code = None);
+                        log::error!("[External] 수신 오류: {}", e);
                         break;
                     }
                 }
             }
         });
 
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+
         let session_task_handle = tokio::spawn(async move {
             tokio::select! {
-                _ = read_task => {},
-                _ = write_task => {},
+                _ = read_task => {}
+                _ = write_task => {}
             }
-            log::info!("External session tasks are closing.");
+            log::info!("[External] 세션 종료");
+            util::mutate_global_state(&app_handle, |s| s.external_connection_code = None);
+
+            // 의도적 종료(cancel)가 아닌 경우에만 자동 재연결 시도
+            if !cancel_for_task.is_cancelled() && attempt < MAX_RECONNECT_ATTEMPTS {
+                let delay = std::cmp::min(5 * 2u64.pow(attempt), 60);
+                log::info!("[External] {}초 후 재연결 시도 ({}/{})", delay, attempt + 1, MAX_RECONNECT_ATTEMPTS);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(delay)) => {
+                        let _ = reconnect_tx.send((url, attempt + 1)).await;
+                    }
+                    _ = cancel_for_task.cancelled() => {
+                        log::info!("[External] 재연결 대기 중 취소됨");
+                    }
+                }
+            }
         });
 
         *external_session_guard = Some(ExternalSession {
             ws_sender: unbounded_tx,
             shutdown_handle: session_task_handle,
+            cancel,
         });
 
         Ok(())

@@ -23,6 +23,9 @@ pub struct RtcSupervisor {
     offsets: Arc<Mutex<Option<TrackerConfig>>>,
     sh_pm_rx: mpsc::Receiver<SignalPacket>,
     collector_rx: mpsc::Receiver<CollectorMessage>,
+    // (url, attempt_count) — 외부 연결 자동 재연결 채널
+    reconnect_tx: mpsc::Sender<(String, u32)>,
+    reconnect_rx: mpsc::Receiver<(String, u32)>,
 }
 
 impl RtcSupervisor {
@@ -30,6 +33,7 @@ impl RtcSupervisor {
         let (sh_pm_tx, sh_pm_rx) = mpsc::channel(128);
         let (pm_sh_tx, pm_sh_rx) = mpsc::channel(128);
         let (_collector_tx, collector_rx) = mpsc::channel(128);
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(4);
 
         let signaling_handler = SignalingHandler::new(sh_pm_tx, pm_sh_rx);
         let peer_manager = PeerManager::new(pm_sh_tx);
@@ -44,6 +48,8 @@ impl RtcSupervisor {
             offsets,
             sh_pm_rx,
             collector_rx,
+            reconnect_tx,
+            reconnect_rx,
         }
     }
 
@@ -130,6 +136,29 @@ impl RtcSupervisor {
                     }
                 }
 
+                Some((url, attempt)) = self.reconnect_rx.recv() => {
+                    log::info!("[External] 자동 재연결 시도 {}/{}", attempt, crate::signaling_handler::MAX_RECONNECT_ATTEMPTS);
+                    let code = url.trim_end_matches("?role=server")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    match self.signaling_handler.connect_to_external_server(
+                        app_handle.clone(),
+                        url,
+                        0, // 성공 시 attempt 리셋 → 다음 끊김 시 처음부터
+                        self.reconnect_tx.clone(),
+                    ).await {
+                        Ok(_) => {
+                            util::mutate_global_state(&app_handle, |s| s.external_connection_code = Some(code));
+                            log::info!("[External] 자동 재연결 성공");
+                        }
+                        Err(e) => {
+                            log::error!("[External] 자동 재연결 실패 ({}회 시도 후 포기): {}", attempt, e);
+                        }
+                    }
+                }
+
                 Some(command) = command_rx.recv() => {
                     match command {
                         SupervisorCommand::AttachProcess(proc_name, responder) => {
@@ -151,9 +180,12 @@ impl RtcSupervisor {
                         }
                         SupervisorCommand::RestartExternalConnection(responder) => {
                             let code = generate_room_code_base36();
+                            let url = format!("wss://concourse.wuwa.moe/{}?role=server", code);
                             match self.signaling_handler.connect_to_external_server(
                                 app_handle.clone(),
-                                format!("wss://concourse.wuwa.moe/{}?role=server", code),
+                                url,
+                                0,
+                                self.reconnect_tx.clone(),
                             ).await {
                                 Ok(_) => {
                                     let code_clone = code.clone();

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -121,10 +122,10 @@ pub enum WsRouteInfo {
 
 #[derive(Debug)]
 pub struct ExternalSession {
-    // command_processor가 사용할 메시지 발신용 채널의 Sender
     pub ws_sender: futures_mpsc::UnboundedSender<TungsteniteMessage>,
-    // 이 세션의 모든 태스크를 한 번에 종료시키기 위한 핸들
     pub shutdown_handle: JoinHandle<()>,
+    /// 의도적 종료 시 cancel() 호출 → 자동 재연결 방지
+    pub cancel: CancellationToken,
 }
 
 impl Default for LocalStorageConfig {
