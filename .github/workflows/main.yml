@@ -20,7 +20,10 @@ jobs:
             args: ""
             rust-targets: ""
           - platform: "macos-latest"
-            args: "--target universal-apple-darwin"
+            args: >-
+              --target universal-apple-darwin
+              --bundles dmg
+              --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
 
     runs-on: ${{ matrix.platform }}
