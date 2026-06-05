@@ -70,6 +70,7 @@ Tauri, SvelteKit, TypeScript를 기반으로 제작되었습니다.
     ```
 
     이 방식은 Developer ID 서명과 notarization을 거치지 않으므로, 다른 Mac에서 처음 열 때 Gatekeeper 경고가 표시될 수 있습니다.
+    배포 환경에 따라 서명 방식과 notarization 설정은 별도로 조정하세요.
 
 -----
 
