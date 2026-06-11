@@ -166,9 +166,57 @@ async fn check_store_updates_background(app_handle: AppHandle) -> Result<(), Str
     Ok(())
 }
 
+fn log_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let dir = std::env::var_os("APPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("com.wumadevs.wumatracker").join("logs"));
+
+    #[cfg(target_os = "macos")]
+    let dir = std::env::var_os("HOME")
+        .map(|d| std::path::PathBuf::from(d).join("Library").join("Logs").join("com.wumadevs.wumatracker"));
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let dir: Option<std::path::PathBuf> = None;
+
+    dir.map(|d| d.join("WumaTracker.log"))
+}
+
+fn rotate_log_if_needed() {
+    const MAX_BYTES: u64 = 5 * 1024 * 1024;
+    let Some(path) = log_path() else { return };
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= MAX_BYTES {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+async fn log_truncation_loop(cancel: CancellationToken) {
+    const MAX_BYTES: u64 = 5 * 1024 * 1024;
+    const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1800); // 30분
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(CHECK_INTERVAL) => {}
+        }
+        let Some(path) = log_path() else { continue };
+        if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) < MAX_BYTES {
+            continue;
+        }
+        // append 모드로 열린 핸들이 있어도 set_len(0) 후 다음 write는 offset 0부터 시작됨
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+            if let Err(e) = file.set_len(0) {
+                log::warn!("로그 파일 트런케이션 실패: {}", e);
+            } else {
+                log::info!("로그 파일 크기 초과로 인해 트런케이션됨");
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tokio::main]
 pub async fn run() {
+    rotate_log_if_needed();
+
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("install rustls crypto provider");
@@ -195,6 +243,8 @@ pub async fn run() {
     let mut rtc_supervisor = RtcSupervisor::new(offsets_for_supervisor);
     let shutdown_token = CancellationToken::new();
     let supervisor_token = shutdown_token.clone();
+    let log_truncation_token = shutdown_token.clone();
+    tokio::spawn(log_truncation_loop(log_truncation_token));
     let (supervisor_tx, supervisor_rx) = mpsc::channel(32);
     let (global_state_tx, _) = watch::channel(GlobalState::default());
 
@@ -208,7 +258,6 @@ pub async fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
-                .max_file_size(5242880)
                 .build(),
         )
         .plugin(tauri_plugin_process::init())

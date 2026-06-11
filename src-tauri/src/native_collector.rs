@@ -154,6 +154,7 @@ pub async fn collection_loop(
                     .map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
                 if should_emit {
                     last_error_emit = Some(Instant::now());
+                    log::warn!("좌표 수집 실패(5초 주기 로그): {}", e);
                     if pm_tx
                         .send(CollectorMessage::TemporalError(e.to_string()))
                         .await

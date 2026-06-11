@@ -151,7 +151,7 @@ impl SignalingHandler {
                             log::warn!("[External] Pong 미수신 → 연결 끊김 감지");
                             break;
                         }
-                        log::info!("[External] {}초 비활성 → Ping 전송", PING_INTERVAL_SECS);
+                        log::debug!("[External] {}초 비활성 → Ping 전송", PING_INTERVAL_SECS);
                         if ping_tx.unbounded_send(TungsteniteMessage::Ping(vec![].into())).is_err() {
                             log::error!("[External] Ping 전송 실패: 연결 종료");
                             break;
@@ -181,7 +181,7 @@ impl SignalingHandler {
                                 }
                             }
                             TungsteniteMessage::Pong(_) => {
-                                log::info!("[External] Pong 수신");
+                                log::debug!("[External] Pong 수신");
                             }
                             TungsteniteMessage::Close(_) => {
                                 log::info!("[External] 서버로부터 Close 수신");

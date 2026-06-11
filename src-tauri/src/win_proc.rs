@@ -24,6 +24,10 @@ use winapi::{
         winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
     },
 };
+use winapi::um::memoryapi::VirtualQueryEx;
+use winapi::um::winnt::{
+    MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_GUARD, PAGE_NOACCESS,
+};
 
 // .pdata 스캔 배치 파라미터
 const BATCH_GAP: u64 = 4096;
@@ -188,10 +192,21 @@ impl ProcessBackend for WinProc {
             if success != 0 && bytes_read == buffer.len() {
                 Ok(())
             } else {
+                let os_err = std::io::Error::last_os_error();
+                let code = os_err.raw_os_error().unwrap_or(-1);
+                // 299 = ERROR_PARTIAL_COPY: 페이지가 보호/미커밋/암호화 상태일 때 발생 (안티치트 시그니처)
+                // 5   = ERROR_ACCESS_DENIED: 핸들 권한 박탈
+                let hint = match code {
+                    299 => " [ERROR_PARTIAL_COPY: 페이지 보호/암호화 의심]",
+                    5 => " [ERROR_ACCESS_DENIED: 핸들 권한 박탈 의심]",
+                    6 => " [ERROR_INVALID_HANDLE: 핸들 무효화]",
+                    _ => "",
+                };
+                let page = describe_page(self.handle, address);
                 Err(ValueReadError {
                     message: format!(
-                        "ReadProcessMemory 실패: address={:X}, bytes_read={}/{}",
-                        address, bytes_read, buffer.len()
+                        "ReadProcessMemory 실패: address={:X}, bytes_read={}/{}, os_error={}{} ({}) {}",
+                        address, bytes_read, buffer.len(), code, hint, os_err, page
                     ),
                 })
             }
@@ -245,10 +260,17 @@ impl ProcessBackend for WinProc {
     }
 
     fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError> {
-        let rva = if self.gworld_rva != 0 { self.gworld_rva } else { offset.global_gworld };
+        let (rva, source) = if self.gworld_rva != 0 {
+            (self.gworld_rva, "스캔")
+        } else {
+            (offset.global_gworld, "폴백")
+        };
         let target = self.base_addr + rva;
         self.read_memory::<u64>(target).map_err(|e| PointerChainError {
-            message: format!("GWorld 위치 ({:X})의 주소 값을 읽지 못했습니다: {}", target, e),
+            message: format!(
+                "GWorld(.data) 위치 ({:X}, RVA {:X} [{}])의 주소 값을 읽지 못했습니다: {}",
+                target, rva, source, e
+            ),
         })
     }
 }
@@ -267,6 +289,54 @@ impl Drop for WinProc {
 unsafe impl Send for WinProc {}
 
 // ── PE 헤더 파싱 ──────────────────────────────────────────────────────────────
+
+/// VirtualQueryEx로 주소가 속한 페이지의 상태/보호를 사람이 읽을 수 있게 기술한다.
+/// 읽기 실패의 원인이 (1) 잘못된 포인터(FREE/RESERVE), (2) 능동적 보호(GUARD/NOACCESS),
+/// (3) 일시적 경계 문제(COMMIT 가독) 중 무엇인지 구분하는 데 쓰인다.
+fn describe_page(handle: HANDLE, address: u64) -> String {
+    unsafe {
+        let mut mbi: MEMORY_BASIC_INFORMATION = mem::zeroed();
+        let r = VirtualQueryEx(
+            handle,
+            address as *const c_void,
+            &mut mbi,
+            mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        );
+        if r == 0 {
+            return format!("VirtualQueryEx 실패: {}", std::io::Error::last_os_error());
+        }
+        let state = match mbi.State {
+            MEM_COMMIT => "COMMIT",
+            MEM_RESERVE => "RESERVE",
+            MEM_FREE => "FREE",
+            _ => "UNKNOWN",
+        };
+        let mut flags = String::new();
+        if mbi.Protect & PAGE_GUARD != 0 {
+            flags.push_str(" +PAGE_GUARD");
+        }
+        if mbi.Protect & PAGE_NOACCESS != 0 {
+            flags.push_str(" +PAGE_NOACCESS");
+        }
+        let verdict = match mbi.State {
+            MEM_FREE | MEM_RESERVE => " → 잘못된 포인터(미커밋)",
+            MEM_COMMIT if mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS) != 0 => {
+                " → 능동적 보호(ACE 의심)"
+            }
+            MEM_COMMIT => " → 커밋/가독인데 RPM 실패(경계걸침/일시적 의심)",
+            _ => "",
+        };
+        format!(
+            "[페이지 state={} protect=0x{:X}{} region_base={:X} region_size={:X}{}]",
+            state,
+            mbi.Protect,
+            flags,
+            mbi.BaseAddress as u64,
+            mbi.RegionSize,
+            verdict
+        )
+    }
+}
 
 fn rpm_u32(handle: HANDLE, addr: u64) -> Option<u32> {
     let mut buf = [0u8; 4];

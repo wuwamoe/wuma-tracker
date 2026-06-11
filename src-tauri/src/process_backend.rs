@@ -59,21 +59,37 @@ pub fn select_player_info<B: ProcessBackend>(
         *cached_offset = None;
     }
 
+    let mut first_err: Option<NativeError> = None;
     for (i, offset) in offsets.iter().enumerate() {
-        if let Ok(location) = read_player_info(backend, offset) {
-            log::info!(
-                "Offset variant #{} ({}) succeeded.",
-                i + 1,
-                backend.active_offset_name(offset)
-            );
-            *cached_offset = Some(offset.clone());
-            return Ok(location);
+        match read_player_info(backend, offset) {
+            Ok(location) => {
+                log::info!(
+                    "Offset variant #{} ({}) succeeded.",
+                    i + 1,
+                    backend.active_offset_name(offset)
+                );
+                *cached_offset = Some(offset.clone());
+                return Ok(location);
+            }
+            Err(e) => {
+                log::debug!(
+                    "Offset variant #{} ({}) failed: {}",
+                    i + 1,
+                    backend.active_offset_name(offset),
+                    e
+                );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
         }
     }
 
-    Err(PointerChainError {
+    // 모든 variant 실패 시, 첫 variant의 실제 실패 원인을 그대로 노출한다.
+    // (실패 단계 = GWorld(.data) read 인지, 이후 포인터 체인인지 + OS 에러 코드 포함)
+    Err(first_err.unwrap_or(PointerChainError {
         message: "사용 가능한 버전 값을 찾지 못했습니다.".to_string(),
-    })
+    }))
 }
 
 fn read_player_info<B: ProcessBackend>(
@@ -94,14 +110,24 @@ fn read_player_info<B: ProcessBackend>(
     let mut last_addr = gworld;
     for (name, field_offset) in targets {
         let target = last_addr + field_offset;
-        last_addr = backend
-            .read_memory::<u64>(target)
-            .map_err(|e| PointerChainError {
-                message: format!(
-                    "'{}' 위치 ({:X})의 주소 값을 읽지 못했습니다: {}",
-                    name, target, e
-                ),
-            })?;
+        match backend.read_memory::<u64>(target) {
+            Ok(v) => {
+                last_addr = v;
+            }
+            Err(e) => {
+                return Err(PointerChainError {
+                    message: format!(
+                        "포인터 체인 '{}' 단계 실패: 읽기주소={:X} (부모={:X}+오프셋={:X}), 부모포인터상태=[{}] | {}",
+                        name,
+                        target,
+                        last_addr,
+                        field_offset,
+                        classify_ptr(last_addr),
+                        e
+                    ),
+                });
+            }
+        }
     }
 
     let transform_addr = last_addr + offset.uscenecomponent_componenttoworld;
@@ -149,6 +175,25 @@ fn read_player_info<B: ProcessBackend>(
         yaw,
         roll,
     })
+}
+
+/// 포인터 값의 타당성을 분류해 실패 원인 진단을 돕는다.
+/// - NULL/거의NULL: 게임 상태 문제(아직 월드 미진입, 폰 없음 등) 또는 오프셋이 null 슬롯을 가리킴
+/// - 비정상범위: 오프셋/버전 불일치로 엉뚱한 값을 따라감, 또는 ACE의 포인터 암호화/셔플 의심
+/// - 정상범위인데 읽기 실패: 페이지 보호/해제 의심
+fn classify_ptr(p: u64) -> &'static str {
+    const USERMODE_MAX: u64 = 0x0000_7FFF_FFFF_FFFF; // Win x64 유저모드 상한
+    if p == 0 {
+        "NULL"
+    } else if p < 0x1_0000 {
+        "거의NULL(작은값)"
+    } else if p > USERMODE_MAX {
+        "비정상(비canonical/커널영역)"
+    } else if p & 0xF != 0 {
+        "정상범위(미정렬)"
+    } else {
+        "정상범위(usermode)"
+    }
 }
 
 fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {
