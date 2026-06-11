@@ -10,7 +10,8 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "prepare": "svelte-kit sync",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version:set": "node scripts/version.mjs"
   },
   "license": "GPL-3.0-only",
   "dependencies": {
