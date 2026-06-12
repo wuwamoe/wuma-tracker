@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod mac_proc;
+mod game_launcher;
 mod native_collector;
 mod offset_manager;
 mod offsets;
@@ -75,6 +76,7 @@ async fn write_config(
     use_secure_connection: Option<bool>,
     auto_attach_enabled: Option<bool>,
     start_in_tray: Option<bool>,
+    game_path: Option<String>,
 ) -> Result<(), String> {
     let Ok(_) = util::write_config(
         app_handle,
@@ -84,6 +86,7 @@ async fn write_config(
             use_secure_connection,
             auto_attach_enabled,
             start_in_tray,
+            game_path,
         },
     )
     .await
@@ -91,6 +94,38 @@ async fn write_config(
         return Err(String::from("Error while saving config"));
     };
     Ok(())
+}
+
+#[tauri::command]
+async fn scan_game_candidates() -> Vec<String> {
+    tokio::task::spawn_blocking(game_launcher::scan_game_candidates)
+        .await
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn launch_and_attach(app_handle: AppHandle, path: String) -> Result<(), String> {
+    if let Ok(config) = util::get_config(app_handle.clone()).await {
+        let _ = util::write_config(
+            app_handle.clone(),
+            LocalStorageConfig { game_path: Some(path.clone()), ..config },
+        )
+        .await;
+    }
+
+    let state = app_handle.state::<TauriState>();
+    let (resp_tx, resp_rx) = oneshot::channel();
+    state
+        .supervisor_tx
+        .send(SupervisorCommand::LaunchAndAttach(path, resp_tx))
+        .await
+        .map_err(|e| format!("앱 내부 오류: {}", e))?;
+
+    match resp_rx.await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("앱 내부 오류: {}", e)),
+    }
 }
 
 #[tauri::command]
@@ -357,7 +392,9 @@ pub async fn run() {
             channel_get_config,
             channel_get_global_state,
             channel_set_global_state,
-            is_store_build
+            is_store_build,
+            scan_game_candidates,
+            launch_and_attach,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

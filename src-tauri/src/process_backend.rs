@@ -20,9 +20,7 @@ pub trait ProcessBackend {
 
     fn read_memory<T: Copy>(&self, address: u64) -> Result<T, NativeError> {
         if address == 0 {
-            return Err(PointerChainError {
-                message: "원격 메모리 주소가 0입니다.".to_string(),
-            });
+            return Err(PointerChainError { message: "addr=0".to_string() });
         }
 
         unsafe {
@@ -49,11 +47,7 @@ pub fn select_player_info<B: ProcessBackend>(
         match read_player_info(backend, offset) {
             Ok(location) => return Ok(location),
             Err(e) => {
-                log::warn!(
-                    "Cached offset {} failed, retrying all variants: {}",
-                    backend.active_offset_name(offset),
-                    e
-                );
+                log::warn!("offset {} miss: {}", backend.active_offset_name(offset), e);
             }
         }
         *cached_offset = None;
@@ -117,13 +111,8 @@ fn read_player_info<B: ProcessBackend>(
             Err(e) => {
                 return Err(PointerChainError {
                     message: format!(
-                        "포인터 체인 '{}' 단계 실패: 읽기주소={:X} (부모={:X}+오프셋={:X}), 부모포인터상태=[{}] | {}",
-                        name,
-                        target,
-                        last_addr,
-                        field_offset,
-                        classify_ptr(last_addr),
-                        e
+                        "chain['{}' {:X}+{:X} {}]: {}",
+                        name, last_addr, field_offset, classify_ptr(last_addr), e
                     ),
                 });
             }
@@ -134,10 +123,7 @@ fn read_player_info<B: ProcessBackend>(
     let location = backend
         .read_memory::<FTransformDouble>(transform_addr)
         .map_err(|e| ValueReadError {
-            message: format!(
-                "FTransform 위치 ({:X})의 값을 읽지 못했습니다: {}",
-                transform_addr, e
-            ),
+            message: format!("ftrans@{:X}: {}", transform_addr, e),
         })?;
 
     let (roll, pitch, yaw) = quat_to_euler(
@@ -151,20 +137,14 @@ fn read_player_info<B: ProcessBackend>(
     let persistent_level = backend
         .read_memory::<u64>(persistent_level_addr)
         .map_err(|e| PointerChainError {
-            message: format!(
-                "WorldOrigin을 위한 PersistentLevel 위치 ({:X})의 주소 값을 읽지 못했습니다: {}",
-                persistent_level_addr, e
-            ),
+            message: format!("plevel@{:X}: {}", persistent_level_addr, e),
         })?;
 
     let world_origin_addr = persistent_level + offset.ulevel_lastworldorigin;
     let root_location = backend
         .read_memory::<FIntVector>(world_origin_addr)
         .map_err(|e| ValueReadError {
-            message: format!(
-                "LastWorldOrigin 위치 ({:X})의 값을 읽지 못했습니다: {}",
-                world_origin_addr, e
-            ),
+            message: format!("worigin@{:X}: {}", world_origin_addr, e),
         })?;
 
     Ok(PlayerInfo {
@@ -182,18 +162,12 @@ fn read_player_info<B: ProcessBackend>(
 /// - 비정상범위: 오프셋/버전 불일치로 엉뚱한 값을 따라감, 또는 ACE의 포인터 암호화/셔플 의심
 /// - 정상범위인데 읽기 실패: 페이지 보호/해제 의심
 fn classify_ptr(p: u64) -> &'static str {
-    const USERMODE_MAX: u64 = 0x0000_7FFF_FFFF_FFFF; // Win x64 유저모드 상한
-    if p == 0 {
-        "NULL"
-    } else if p < 0x1_0000 {
-        "거의NULL(작은값)"
-    } else if p > USERMODE_MAX {
-        "비정상(비canonical/커널영역)"
-    } else if p & 0xF != 0 {
-        "정상범위(미정렬)"
-    } else {
-        "정상범위(usermode)"
-    }
+    const USERMODE_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
+    if p == 0 { "NULL" }
+    else if p < 0x1_0000 { "~NULL" }
+    else if p > USERMODE_MAX { "!canon" }
+    else if p & 0xF != 0 { "!align" }
+    else { "ok" }
 }
 
 fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {

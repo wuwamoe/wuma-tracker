@@ -165,6 +165,10 @@ impl RtcSupervisor {
                             let result = self.attach_process(app_handle.clone(), &proc_name).await;
                             let _ = responder.send(result);
                         }
+                        SupervisorCommand::LaunchAndAttach(path, responder) => {
+                            let result = self.do_launch_and_attach(app_handle.clone(), &path).await;
+                            let _ = responder.send(result);
+                        }
                         SupervisorCommand::RestartSignalingServer => {
                             let config = util::get_config(app_handle.clone()).await.unwrap_or_default();
                             if let Err(e) = self.signaling_handler.restart_local_server(
@@ -205,6 +209,44 @@ impl RtcSupervisor {
         }
 
         Ok(())
+    }
+
+    pub async fn do_launch_and_attach(&mut self, app_handle: AppHandle, path: &str) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            if self.collector_state.instance.lock().await.is_some() {
+                self.detach_process().await;
+            }
+
+            let path_str = path.to_string();
+            let cache_dir = app_handle
+                .path()
+                .app_config_dir()
+                .map_err(|e| e.to_string())?;
+
+            let scan_config = self.offsets.lock().await
+                .as_ref()
+                .map(|c| c.gworld_scan.clone());
+
+            let win_proc = tokio::task::spawn_blocking(move || {
+                crate::game_launcher::launch_and_create_proc(&path_str, cache_dir, scan_config)
+            })
+            .await
+            .map_err(|e| format!("태스크 실패: {}", e))?
+            .map_err(|e| e.to_string())?;
+
+            let collector = NativeCollector::from_win_proc(win_proc);
+            *self.collector_state.instance.lock().await = Some(collector);
+            log::info!("Game launched and attached via process handle.");
+            self.try_start_collector().await;
+            util::mutate_global_state(&app_handle, |s| s.proc_state = 1);
+            Ok(())
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            crate::game_launcher::launch_game(path).map_err(|e| e.to_string())
+        }
     }
 
     pub async fn attach_process(&mut self, app_handle: AppHandle, proc_name: &str) -> Result<(), String> {

@@ -32,6 +32,12 @@ pub struct NativeCollector {
 }
 
 impl NativeCollector {
+    #[cfg(windows)]
+    pub fn from_win_proc(proc: crate::win_proc::WinProc) -> Self {
+        let cold_start = !proc.gworld_ready();
+        Self { proc, offset: None, consecutive_failures: 0, rescan_stage: 0, cold_start }
+    }
+
     pub async fn new(proc_name: &str, cache_dir: PathBuf, scan_config: Option<GWorldScanConfig>) -> Result<Self> {
         let proc_name = proc_name.to_string();
         let proc =
@@ -154,13 +160,13 @@ pub async fn collection_loop(
                     .map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
                 if should_emit {
                     last_error_emit = Some(Instant::now());
-                    log::warn!("좌표 수집 실패(5초 주기 로그): {}", e);
+                    log::warn!("collect: {}", e);
                     if pm_tx
-                        .send(CollectorMessage::TemporalError(e.to_string()))
+                        .send(CollectorMessage::TemporalError(e.user_message().to_string()))
                         .await
                         .is_err()
                     {
-                        log::info!("Collection loop exiting: no receiver");
+                        log::info!("collect loop: no receiver");
                         break;
                     }
                 }

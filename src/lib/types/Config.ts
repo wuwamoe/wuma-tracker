@@ -4,4 +4,5 @@ export default interface AppConfig {
   useSecureConnection?: boolean;
   autoAttachEnabled?: boolean;
   startInTray?: boolean;
+  gamePath?: string;
 }

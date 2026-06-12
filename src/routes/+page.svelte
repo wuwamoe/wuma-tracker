@@ -8,6 +8,7 @@
   // Svelte 및 라이브러리 임포트
   import toast from 'svelte-5-french-toast';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 
   // 컴포넌트 임포트 (shadcn-svelte 등)
   import { Button, buttonVariants } from '@/components/ui/button';
@@ -25,6 +26,8 @@
   import IconConnection from '~icons/mdi/connection';
   import IconPower from '~icons/mdi/power';
   import IconRestart from '~icons/mdi/restart';
+  import IconPlay from '~icons/mdi/play-circle-outline';
+  import IconFolder from '~icons/material-symbols/folder-open-outline-rounded';
 
   // 타입 및 유틸리티 임포트
   import type PlayerInfo from '$lib/types/PlayerInfo';
@@ -32,6 +35,15 @@
   import { checkUpdates } from '$lib/utils';
   import type GlobalState from '@/types/GlobalState';
   import { Checkbox } from '@/components/ui/checkbox';
+  import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+  import {
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogDescription,
+    DialogFooter,
+  } from '@/components/ui/dialog';
   import {
     Tooltip,
     TooltipContent,
@@ -53,6 +65,14 @@
   let autoAttachEnabled = $state(false);
   let connectingExternal = $state(false);
   let startInTray = $state(false);
+  let savedGamePath = $state<string | null>(null);
+
+  // 게임 경로 선택 UI 상태
+  let showGamePathPicker = $state(false);
+  let gameCandidates = $state<string[]>([]);
+  let selectedCandidate = $state('');
+  let pickerMode = $state<'launch' | 'save'>('launch');
+  let launchScanning = $state(false);
 
   async function silentAttach() {
     try {
@@ -121,6 +141,7 @@
       .then((config) => {
         autoAttachEnabled = config.autoAttachEnabled ?? false;
         startInTray = config.startInTray ?? false;
+        savedGamePath = config.gamePath ?? null;
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -213,6 +234,96 @@
     });
   }
 
+  async function launchGame() {
+    if (savedGamePath) {
+      doLaunch(savedGamePath);
+      return;
+    }
+    await openGamePathPicker('launch');
+  }
+
+  async function openGamePathPicker(mode: 'launch' | 'save') {
+    launchScanning = true;
+    try {
+      const candidates = await invoke<string[]>('scan_game_candidates');
+      gameCandidates = candidates;
+      selectedCandidate = candidates[0] ?? '';
+      pickerMode = mode;
+      if (candidates.length === 0) {
+        await pickCustomPath(mode);
+      } else {
+        showGamePathPicker = true;
+      }
+    } catch (err) {
+      toast.error(`경로 탐색 실패: ${err}`);
+    } finally {
+      launchScanning = false;
+    }
+  }
+
+  async function pickCustomPath(mode: 'launch' | 'save') {
+    const selected = await openFileDialog({
+      title: '게임 실행 파일 선택 (Client-Win64-Shipping.exe)',
+      filters: [{ name: 'Client-Win64-Shipping.exe', extensions: ['exe'] }],
+    });
+    if (!selected) return;
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    const filename = path.split(/[\\/]/).pop() ?? '';
+    if (filename !== 'Client-Win64-Shipping.exe') {
+      toast.error('Client-Win64-Shipping.exe 파일을 선택해주세요.');
+      return;
+    }
+    showGamePathPicker = false;
+    if (mode === 'launch') {
+      doLaunch(path);
+    } else {
+      await saveGamePath(path);
+    }
+  }
+
+  async function confirmPickerSelection() {
+    showGamePathPicker = false;
+    if (pickerMode === 'launch') {
+      doLaunch(selectedCandidate);
+    } else {
+      await saveGamePath(selectedCandidate);
+    }
+  }
+
+  function doLaunch(path: string) {
+    const promise = invoke('launch_and_attach', { path });
+    promise
+      .then(() => {
+        savedGamePath = path;
+        trackerError = '';
+        errorLastUpdated = null;
+      })
+      .catch(() => {});
+    toast.promise(promise, {
+      loading: '게임 실행 중... (최대 60초 소요)',
+      success: '게임 실행됨!',
+      error: (err) => `게임 실행 실패: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  async function saveGamePath(path: string) {
+    try {
+      const config = await invoke<AppConfig>('channel_get_config');
+      await invoke('write_config', {
+        ip: config.ip ?? null,
+        port: config.port ?? null,
+        useSecureConnection: config.useSecureConnection ?? null,
+        autoAttachEnabled,
+        startInTray,
+        gamePath: path,
+      });
+      savedGamePath = path;
+      toast.success('게임 경로가 저장되었습니다.');
+    } catch (err) {
+      toast.error(`경로 저장 실패: ${err}`);
+    }
+  }
+
   async function applyAndRestart(event: Event) {
     event.preventDefault();
 
@@ -223,6 +334,7 @@
         useSecureConnection: null,
         autoAttachEnabled: autoAttachEnabled,
         startInTray: startInTray,
+        gamePath: savedGamePath,
       });
       await invoke('restart_server');
     };
@@ -291,80 +403,87 @@
         </div>
       </div>
 
-      <div class="flex items-center space-x-2">
+      <div class="grid grid-cols-2 gap-2">
         <div
-          class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
-        ></div>
-        <p class="font-medium text-md">
-          {globalState.procState === 0 ? '게임 연결되지 않음' : '게임 연결됨'}
-        </p>
-        {#if globalState.procState === 1 && globalState.activeOffsetName}
-          <Badge variant="secondary">{globalState.activeOffsetName}</Badge>
-        {/if}
-        {#if autoAttachEnabled && globalState.procState === 0}
-          <Badge variant="secondary" class="flex items-center gap-1">
-            <IconRestart class="h-3 w-3 animate-reverse-spin" />
-            자동 연결 중
-          </Badge>
-        {/if}
-      </div>
+          class={`flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium ${globalState.procState === 0 ? 'bg-red-500/10 text-red-500' : 'bg-green-500/10 text-green-600 dark:text-green-400'}`}
+        >
+          <div
+            class={`w-2 h-2 rounded-full flex-shrink-0 ${globalState.procState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+          ></div>
+          {globalState.procState === 0 ? '게임 미연결' : '게임 연결됨'}
+          {#if globalState.procState === 1 && globalState.activeOffsetName}
+            <Badge variant="secondary" class="ml-auto text-xs"
+              >{globalState.activeOffsetName}</Badge
+            >
+          {/if}
+          {#if autoAttachEnabled && globalState.procState === 0}
+            <IconRestart class="ml-auto h-3.5 w-3.5 animate-reverse-spin" />
+          {/if}
+        </div>
 
-      <div class="flex items-center space-x-2">
         <div
-          class={`w-3 h-3 rounded-full flex-shrink-0 ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
-        ></div>
-        <p class="font-medium text-md">
-          {globalState.serverState === 0
-            ? '통신 서버 비활성'
-            : '통신 서버 활성'}
-        </p>
+          class={`flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium ${globalState.serverState === 0 ? 'bg-red-500/10 text-red-500' : 'bg-green-500/10 text-green-600 dark:text-green-400'}`}
+        >
+          <div
+            class={`w-2 h-2 rounded-full flex-shrink-0 ${globalState.serverState === 0 ? 'bg-red-500' : 'bg-green-500'}`}
+          ></div>
+          {globalState.serverState === 0 ? '서버 비활성' : '서버 활성'}
+        </div>
       </div>
 
       {#if globalState.externalConnectionCode}
-        <div class="flex items-center space-x-2 pt-1">
-          <IconConnection class="h-4 w-4 text-muted-foreground" />
-          <span class="font-medium text-md">공유방 코드:</span>
+        <div
+          class="flex items-center gap-2 rounded-md bg-muted px-3 py-2 text-sm"
+        >
+          <IconConnection class="h-4 w-4 text-muted-foreground shrink-0" />
+          <span class="text-muted-foreground">공유방 코드</span>
           <Badge
             variant="secondary"
-            class="font-mono text-lg cursor-pointer hover:bg-primary/20"
+            class="ml-auto font-mono text-base cursor-pointer hover:bg-primary/20"
             onclick={copyCodeToClipboard}
             title="클릭하여 복사"
           >
             {formattedConnectionCode}
-            <IconCopy class="ml-2 h-4 w-4" />
+            <IconCopy class="ml-1.5 h-3.5 w-3.5" />
           </Badge>
         </div>
       {/if}
 
       {#if globalState.procState === 1 && pLocation}
-        <div class="bg-muted p-3 rounded-md text-sm mt-2">
-          <p class="font-medium mb-2">플레이어 위치</p>
-          <div class="grid grid-cols-3 gap-2 text-center">
-            <div class="bg-background p-1.5 rounded">
-              X: {Math.round(pLocation.x / 100)}
-            </div>
-            <div class="bg-background p-1.5 rounded">
-              Y: {Math.round(pLocation.y / 100)}
-            </div>
-            <div class="bg-background p-1.5 rounded">
-              Z: {Math.round(pLocation.z / 100)}
-            </div>
+        <div class="grid grid-cols-3 gap-2 text-sm text-center">
+          <div class="bg-muted rounded-md py-2">
+            <p class="text-xs text-muted-foreground mb-0.5">X</p>
+            <p class="font-mono font-medium">{Math.round(pLocation.x / 100)}</p>
+          </div>
+          <div class="bg-muted rounded-md py-2">
+            <p class="text-xs text-muted-foreground mb-0.5">Y</p>
+            <p class="font-mono font-medium">{Math.round(pLocation.y / 100)}</p>
+          </div>
+          <div class="bg-muted rounded-md py-2">
+            <p class="text-xs text-muted-foreground mb-0.5">Z</p>
+            <p class="font-mono font-medium">{Math.round(pLocation.z / 100)}</p>
           </div>
         </div>
       {/if}
 
-      <div class="flex space-x-3 pt-2">
-        <Button class="flex-1" onclick={attach}>
+      <div class="flex gap-2 pt-2">
+        {#if globalState.procState === 0}
+          <Button class="flex-1" onclick={launchGame} disabled={launchScanning}>
+            <IconPlay class="mr-2 h-4 w-4" />
+            {launchScanning ? '경로 탐색 중...' : '게임 실행'}
+          </Button>
+        {/if}
+        <Button
+          class="flex-1"
+          variant={globalState.procState === 1 ? 'outline' : 'default'}
+          onclick={attach}
+        >
           <IconConnection class="mr-2 h-4 w-4" />
-          {#if globalState.procState === 1}
-            게임 재연결
-          {:else}
-            게임 연결
-          {/if}
+          {globalState.procState === 1 ? '재연결' : '게임 연결'}
         </Button>
         <Button variant="destructive" class="flex-1" onclick={quit}>
           <IconPower class="mr-2 h-4 w-4" />
-          프로그램 종료
+          종료
         </Button>
       </div>
     </div>
@@ -422,6 +541,25 @@
             </Label>
           </div>
 
+          <div class="space-y-2 pt-3">
+            <Label class="text-sm font-medium">게임 경로</Label>
+            {#if savedGamePath}
+              <p class="text-xs font-mono text-muted-foreground break-all">{savedGamePath}</p>
+            {:else}
+              <p class="text-xs text-muted-foreground">저장된 경로 없음</p>
+            {/if}
+            <Button
+              variant="outline"
+              size="sm"
+              class="w-full"
+              onclick={() => openGamePathPicker('save')}
+              disabled={launchScanning}
+            >
+              <IconFolder class="mr-2 h-4 w-4" />
+              경로 {savedGamePath ? '변경' : '설정'}
+            </Button>
+          </div>
+
           <Button onclick={applyAndRestart} class="w-full mt-4">
             <IconRestart class="mr-2 h-4 w-4" />
             설정 적용 및 서버 재시작
@@ -431,3 +569,51 @@
     </div>
   </TooltipProvider>
 </main>
+
+<Dialog bind:open={showGamePathPicker}>
+  <DialogContent class="max-w-md">
+    <DialogHeader>
+      <DialogTitle>게임 경로 선택</DialogTitle>
+      <DialogDescription>
+        실행할 게임 경로를 선택하거나 직접 지정하세요.
+      </DialogDescription>
+    </DialogHeader>
+
+    <div class="py-2 space-y-2">
+      {#if gameCandidates.length > 0}
+        <RadioGroup bind:value={selectedCandidate} class="gap-2">
+          {#each gameCandidates as candidate}
+            <label
+              for={candidate}
+              class="flex items-center gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-colors hover:bg-accent {selectedCandidate === candidate ? 'border-primary bg-primary/5' : 'border-border'}"
+            >
+              <RadioGroupItem value={candidate} id={candidate} />
+              <span class="font-mono text-xs break-all">{candidate}</span>
+            </label>
+          {/each}
+        </RadioGroup>
+      {:else}
+        <p class="text-sm text-muted-foreground py-1">자동으로 탐지된 경로가 없습니다.</p>
+      {/if}
+
+      <div class="relative py-2">
+        <div class="absolute inset-0 flex items-center"><span class="w-full border-t"></span></div>
+        <div class="relative flex justify-center">
+          <span class="bg-background px-2 text-xs text-muted-foreground">또는</span>
+        </div>
+      </div>
+
+      <Button variant="outline" class="w-full" onclick={() => pickCustomPath(pickerMode)}>
+        <IconFolder class="mr-2 h-4 w-4" />
+        직접 선택...
+      </Button>
+    </div>
+
+    <DialogFooter class="gap-2">
+      <Button variant="outline" onclick={() => (showGamePathPicker = false)}>취소</Button>
+      <Button disabled={!selectedCandidate} onclick={confirmPickerSelection}>
+        {pickerMode === 'launch' ? '선택 후 실행' : '저장'}
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>

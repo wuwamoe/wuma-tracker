@@ -54,6 +54,7 @@ pub struct LocalStorageConfig {
     pub use_secure_connection: Option<bool>,
     pub auto_attach_enabled: Option<bool>,
     pub start_in_tray: Option<bool>,
+    pub game_path: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -79,14 +80,37 @@ pub struct SignalPacket {
 
 #[derive(Error, Debug)]
 pub enum NativeError {
-    #[error("프로세스가 종료되었습니다.")]
+    #[error("proc_terminated")]
     ProcessTerminated,
 
-    #[error("포인터 체인 탐색 실패: {message}")]
+    #[error("{message}")]
     PointerChainError { message: String },
 
-    #[error("값 읽기 실패: {message}")]
+    #[error("{message}")]
     ValueReadError { message: String },
+}
+
+impl NativeError {
+    /// 프론트엔드 표시용 간결한 한국어 메시지
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            NativeError::ProcessTerminated => "게임 프로세스가 종료되었습니다.",
+            NativeError::PointerChainError { message }
+            | NativeError::ValueReadError { message } => {
+                if message.contains("[ACCESS]") {
+                    "메모리 접근 거부 (ACE 핸들 권한 박탈)"
+                } else if message.contains("[INV_HDL]") {
+                    "프로세스 핸들이 무효화되었습니다."
+                } else if message.contains("[PARTIAL]") {
+                    "ACE 메모리 보호 중 (게임 초기화/로딩 중...)"
+                } else if message.contains("NULL") || message.contains("addr=0") {
+                    "게임 월드 초기화 중 (잠시 대기...)"
+                } else {
+                    "메모리 읽기 실패"
+                }
+            }
+        }
+    }
 }
 
 pub enum CollectorMessage {
@@ -99,6 +123,7 @@ pub enum CollectorMessage {
 #[derive(Debug)]
 pub enum SupervisorCommand {
     AttachProcess(String, oneshot::Sender<Result<(), String>>),
+    LaunchAndAttach(String, oneshot::Sender<Result<(), String>>),
     RestartSignalingServer,
     RestartExternalConnection(oneshot::Sender<Result<String, String>>),
 }
@@ -136,6 +161,7 @@ impl Default for LocalStorageConfig {
             use_secure_connection: None,
             auto_attach_enabled: None,
             start_in_tray: None,
+            game_path: None,
         }
     }
 }

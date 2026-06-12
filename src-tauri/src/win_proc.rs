@@ -136,6 +136,66 @@ impl WinProc {
         }
     }
 
+    pub fn from_handle(
+        handle: HANDLE,
+        pid: u32,
+        cache_dir: PathBuf,
+        scan_config: Option<GWorldScanConfig>,
+    ) -> Result<Self> {
+        let scan_config = scan_config.unwrap_or_default();
+
+        let base_addr = Self::wait_for_base_addr(handle)?;
+
+        let gworld_rva = if scan_config.enabled {
+            let prefix = parse_prefix(&scan_config.prefix);
+            let suffix = parse_suffix(&scan_config.suffix);
+            match find_gworld_rva_with_cache(handle, base_addr, &cache_dir, &prefix, &suffix) {
+                Ok(rva) => rva,
+                Err(e) => {
+                    log::warn!("GWorld 스캔 실패, 오프셋 폴백 사용: {}", e);
+                    0
+                }
+            }
+        } else {
+            log::info!("GWorld 자동 탐색 비활성화됨 (원격 설정), 오프셋 폴백 사용");
+            0
+        };
+
+        log::info!(
+            "프로세스 직접 실행 연결됨! PID: {}, Base: {:X}, GWorld RVA: {}",
+            pid,
+            base_addr,
+            if gworld_rva != 0 { format!("{:X}", gworld_rva) } else { "폴백".to_string() }
+        );
+
+        Ok(WinProc { pid, base_addr, handle, gworld_rva, cache_dir, scan_config })
+    }
+
+    fn wait_for_base_addr(handle: HANDLE) -> Result<u64> {
+        const MAX_TRIES: u32 = 30;
+        for attempt in 0..MAX_TRIES {
+            let mut h_mod: HMODULE = null_mut();
+            let mut cb_needed: DWORD = 0;
+            let ok = unsafe {
+                EnumProcessModulesEx(
+                    handle,
+                    &mut h_mod,
+                    mem::size_of::<HMODULE>() as DWORD,
+                    &mut cb_needed,
+                    LIST_MODULES_DEFAULT,
+                )
+            };
+            if ok != 0 {
+                return Ok(h_mod as u64);
+            }
+            if attempt < MAX_TRIES - 1 {
+                log::info!("게임 모듈 로드 대기 중... ({}초 경과)", (attempt + 1) * 2);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        bail!("게임 시작 후 모듈 로드 대기 시간 초과 (60초)")
+    }
+
     unsafe fn find_pid_by_name(name: &str) -> Option<u32> {
         let h_process_snap: HANDLE = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if h_process_snap.is_null() {
@@ -192,22 +252,16 @@ impl ProcessBackend for WinProc {
             if success != 0 && bytes_read == buffer.len() {
                 Ok(())
             } else {
-                let os_err = std::io::Error::last_os_error();
-                let code = os_err.raw_os_error().unwrap_or(-1);
-                // 299 = ERROR_PARTIAL_COPY: 페이지가 보호/미커밋/암호화 상태일 때 발생 (안티치트 시그니처)
-                // 5   = ERROR_ACCESS_DENIED: 핸들 권한 박탈
+                let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
                 let hint = match code {
-                    299 => " [ERROR_PARTIAL_COPY: 페이지 보호/암호화 의심]",
-                    5 => " [ERROR_ACCESS_DENIED: 핸들 권한 박탈 의심]",
-                    6 => " [ERROR_INVALID_HANDLE: 핸들 무효화]",
-                    _ => "",
+                    299 => "[PARTIAL]",
+                    5   => "[ACCESS]",
+                    6   => "[INV_HDL]",
+                    _   => "",
                 };
                 let page = describe_page(self.handle, address);
                 Err(ValueReadError {
-                    message: format!(
-                        "ReadProcessMemory 실패: address={:X}, bytes_read={}/{}, os_error={}{} ({}) {}",
-                        address, bytes_read, buffer.len(), code, hint, os_err, page
-                    ),
+                    message: format!("RPM@{:X} e{}{} {}", address, code, hint, page),
                 })
             }
         }
@@ -261,16 +315,13 @@ impl ProcessBackend for WinProc {
 
     fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError> {
         let (rva, source) = if self.gworld_rva != 0 {
-            (self.gworld_rva, "스캔")
+            (self.gworld_rva, "scan")
         } else {
-            (offset.global_gworld, "폴백")
+            (offset.global_gworld, "fb")
         };
         let target = self.base_addr + rva;
         self.read_memory::<u64>(target).map_err(|e| PointerChainError {
-            message: format!(
-                "GWorld(.data) 위치 ({:X}, RVA {:X} [{}])의 주소 값을 읽지 못했습니다: {}",
-                target, rva, source, e
-            ),
+            message: format!("gworld@{:X} rva={:X}[{}]: {}", target, rva, source, e),
         })
     }
 }
@@ -290,9 +341,6 @@ unsafe impl Send for WinProc {}
 
 // ── PE 헤더 파싱 ──────────────────────────────────────────────────────────────
 
-/// VirtualQueryEx로 주소가 속한 페이지의 상태/보호를 사람이 읽을 수 있게 기술한다.
-/// 읽기 실패의 원인이 (1) 잘못된 포인터(FREE/RESERVE), (2) 능동적 보호(GUARD/NOACCESS),
-/// (3) 일시적 경계 문제(COMMIT 가독) 중 무엇인지 구분하는 데 쓰인다.
 fn describe_page(handle: HANDLE, address: u64) -> String {
     unsafe {
         let mut mbi: MEMORY_BASIC_INFORMATION = mem::zeroed();
@@ -303,38 +351,24 @@ fn describe_page(handle: HANDLE, address: u64) -> String {
             mem::size_of::<MEMORY_BASIC_INFORMATION>(),
         );
         if r == 0 {
-            return format!("VirtualQueryEx 실패: {}", std::io::Error::last_os_error());
+            return format!("[vqex_e{}]", std::io::Error::last_os_error().raw_os_error().unwrap_or(-1));
         }
         let state = match mbi.State {
-            MEM_COMMIT => "COMMIT",
-            MEM_RESERVE => "RESERVE",
+            MEM_COMMIT => "CMT",
+            MEM_RESERVE => "RSV",
             MEM_FREE => "FREE",
-            _ => "UNKNOWN",
+            _ => "?",
         };
-        let mut flags = String::new();
-        if mbi.Protect & PAGE_GUARD != 0 {
-            flags.push_str(" +PAGE_GUARD");
-        }
-        if mbi.Protect & PAGE_NOACCESS != 0 {
-            flags.push_str(" +PAGE_NOACCESS");
-        }
+        let mut prot = String::new();
+        if mbi.Protect & PAGE_GUARD != 0 { prot.push_str("+GUARD"); }
+        if mbi.Protect & PAGE_NOACCESS != 0 { prot.push_str("+NAX"); }
         let verdict = match mbi.State {
-            MEM_FREE | MEM_RESERVE => " → 잘못된 포인터(미커밋)",
-            MEM_COMMIT if mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS) != 0 => {
-                " → 능동적 보호(ACE 의심)"
-            }
-            MEM_COMMIT => " → 커밋/가독인데 RPM 실패(경계걸침/일시적 의심)",
+            MEM_FREE | MEM_RESERVE => "!commit",
+            MEM_COMMIT if mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS) != 0 => "!ACE",
+            MEM_COMMIT => "!tmp",
             _ => "",
         };
-        format!(
-            "[페이지 state={} protect=0x{:X}{} region_base={:X} region_size={:X}{}]",
-            state,
-            mbi.Protect,
-            flags,
-            mbi.BaseAddress as u64,
-            mbi.RegionSize,
-            verdict
-        )
+        format!("[{}{}{} @{:X}+{:X}]", state, prot, verdict, mbi.BaseAddress as u64, mbi.RegionSize)
     }
 }
 
