@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Builds the WumaTracker kernel driver with an Enterprise WDK (EWDK) and code-signs it.
 
@@ -14,14 +14,20 @@
     Path to an extracted/mounted EWDK image (contains LaunchBuildEnv.cmd).
 
 .PARAMETER CertThumbprint
-    SHA1 thumbprint of the code-signing certificate in the current user's certificate
-    store (CurrentUser\My). Required unless -SkipSign is passed.
+    SHA1 thumbprint of a specific code-signing certificate in the current user's
+    certificate store (CurrentUser\My). Optional — when omitted, signtool is
+    called with /a instead, which auto-selects the best valid code-signing
+    certificate from the store (this is what plain `signtool sign /a ...`
+    does).
 
 .PARAMETER TimestampUrl
     RFC 3161 timestamp server URL. Certum's is used by default since that's the CA in use.
 
 .PARAMETER SkipSign
     Build only; skip the signtool step (useful for quick compile checks).
+
+.EXAMPLE
+    .\build-and-sign.ps1
 
 .EXAMPLE
     .\build-and-sign.ps1 -CertThumbprint B9487CB38D51E2201079B302963AC0E41EE1B933
@@ -50,10 +56,6 @@ function Fail($msg) {
     exit 1
 }
 
-if (-not $SkipSign -and -not $CertThumbprint) {
-    Fail "CertThumbprint이 필요합니다 (서명을 건너뛰려면 -SkipSign 사용)."
-}
-
 $setupBuildEnv = Join-Path $EwdkRoot "BuildEnv\SetupBuildEnv.cmd"
 if (-not (Test-Path $setupBuildEnv)) {
     Fail "EWDK를 찾을 수 없습니다: $setupBuildEnv (-EwdkRoot 확인)"
@@ -66,17 +68,42 @@ Write-Host "[0/6] 헬퍼 빌드 중 (cargo build --release, $HelperDir)..." -For
 
 Push-Location $HelperDir
 try {
-    & cargo build --release
-    if ($LASTEXITCODE -ne 0) {
-        Fail "헬퍼 cargo build 실패 (exit $LASTEXITCODE)"
+    # driver/.cargo/config.toml's target.<triple>.rustflags (kernel-driver
+    # linker flags: /DRIVER /SUBSYSTEM:NATIVE /NODEFAULTLIB /ENTRY:DriverEntry
+    # /INTEGRITYCHECK, static CRT) leaks in here because cargo config discovery
+    # walks up the directory tree and MERGES (appends) array-typed keys like
+    # rustflags across every config file it finds along the way — a closer
+    # driver\helper\.cargo\config.toml, or even a --config CLI override for
+    # the same key, only adds to that list rather than replacing it. Setting
+    # the real RUSTFLAGS environment variable is the one thing that actually
+    # wins outright over config-file rustflags instead of merging with them,
+    # so it's used here (scoped to this one invocation) to build a normal
+    # usermode binary instead of a kernel driver.
+    $prevRustflags = $env:RUSTFLAGS
+    # A literal "" is indistinguishable from unset on Windows (assigning it
+    # removes the variable from the child process environment instead of
+    # keeping it defined-but-empty), which would silently fall back to the
+    # merged config rustflags again. A single space is a real, non-empty
+    # value that rustc's whitespace-based flag splitting treats as no flags.
+    $env:RUSTFLAGS = " "
+    try {
+        & cargo build --release
+        if ($LASTEXITCODE -ne 0) {
+            Fail "헬퍼 cargo build 실패 (exit $LASTEXITCODE)"
+        }
+    } finally {
+        $env:RUSTFLAGS = $prevRustflags
     }
 } finally {
     Pop-Location
 }
 
-$builtHelperExe = Join-Path $HelperDir "target\release\wuma_tracker_helper.exe"
+$builtHelperExe = Join-Path $HelperDir "target\x86_64-pc-windows-msvc\release\wuma_tracker_helper.exe"
 if (-not (Test-Path $builtHelperExe)) {
-    Fail "헬퍼 빌드 산출물을 찾지 못했습니다: $builtHelperExe"
+    $builtHelperExe = Join-Path $HelperDir "target\release\wuma_tracker_helper.exe"
+}
+if (-not (Test-Path $builtHelperExe)) {
+    Fail "헬퍼 빌드 산출물을 찾지 못했습니다: $HelperDir\target\{x86_64-pc-windows-msvc\release,release}\wuma_tracker_helper.exe"
 }
 New-Item -ItemType Directory -Force -Path (Split-Path $OutHelperExe) | Out-Null
 Copy-Item $builtHelperExe $OutHelperExe -Force
@@ -170,7 +197,8 @@ if ($SkipSign) {
     exit 0
 }
 
-Write-Host "[5/6] signtool로 드라이버+헬퍼 서명 중 (thumbprint=$CertThumbprint)..." -ForegroundColor Cyan
+$certDesc = if ($CertThumbprint) { "thumbprint=$CertThumbprint" } else { "/a 자동 선택" }
+Write-Host "[5/6] signtool로 드라이버+헬퍼 서명 중 ($certDesc)..." -ForegroundColor Cyan
 
 $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match "\\x64\\" } |
@@ -181,16 +209,28 @@ if (-not $signtool) {
     Fail "signtool.exe를 찾지 못했습니다."
 }
 
+$certSelectArgs = if ($CertThumbprint) { @("/sha1", $CertThumbprint) } else { @("/a") }
+
+# signtool writes routine informational output to stderr (e.g. the list of
+# candidate certificates when using /a), which $ErrorActionPreference = "Stop"
+# would otherwise turn into a terminating error before signtool finishes —
+# same class of issue as the EWDK env-loading step above.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 foreach ($target in @($OutSys, $OutHelperExe)) {
-    & $signtool sign /sha1 $CertThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 /v $target
+    $signArgs = @("sign") + $certSelectArgs + @("/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256", "/v", $target)
+    & $signtool @signArgs
     if ($LASTEXITCODE -ne 0) {
+        $ErrorActionPreference = $prevEap
         Fail "signtool sign 실패 ($target, exit $LASTEXITCODE)"
     }
 
     & $signtool verify /pa /v $target
     if ($LASTEXITCODE -ne 0) {
+        $ErrorActionPreference = $prevEap
         Fail "signtool verify 실패 ($target, exit $LASTEXITCODE)"
     }
 }
+$ErrorActionPreference = $prevEap
 
 Write-Host "빌드 + 서명 완료: $OutSys, $OutHelperExe" -ForegroundColor Green

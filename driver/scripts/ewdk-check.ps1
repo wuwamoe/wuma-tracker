@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Runs `cargo check` for the WumaTracker kernel driver using an Enterprise WDK (EWDK)
     build environment, without building or signing. Mirrors build-and-sign.ps1's EWDK

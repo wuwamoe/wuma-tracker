@@ -113,19 +113,6 @@ extern "system" {
     fn ExFreePool(P: PVOID);
     fn KeStackAttachProcess(Process: PEPROCESS, ApcState: *mut u8);
     fn KeUnstackDetachProcess(ApcState: *mut u8);
-    // Not part of the wdk-sys ntddk.h binding subset; declared directly since it
-    // is exported by ntoskrnl.exe like every other WDM routine used here.
-    fn IoCreateDeviceSecure(
-        DriverObject: *mut u8,
-        DeviceExtensionSize: ULONG,
-        DeviceName: PUNICODE_STRING,
-        DeviceType: ULONG,
-        DeviceCharacteristics: ULONG,
-        Exclusive: u8,
-        DefaultSDDLString: PUNICODE_STRING,
-        DeviceClassGuid: PVOID,
-        DeviceObject: *mut PDEVICE_OBJECT,
-    ) -> NTSTATUS;
     fn KeBugCheckEx(
         BugCheckCode: ULONG,
         BugCheckParameter1: ULONG_PTR,
@@ -151,8 +138,24 @@ static DEVICE_SDDL: &[u16] = &[
     0x44, 0x3A, 0x50, 0x28, 0x41, 0x3B, 0x3B, 0x47, 0x41, 0x3B, 0x3B, 0x3B, 0x42, 0x41, 0x29, 0x28,
     0x41, 0x3B, 0x3B, 0x47, 0x41, 0x3B, 0x3B, 0x3B, 0x53, 0x59, 0x29, 0,
 ];
+// IoCreateDeviceSecure is a real WDM export (documented since Vista) but is
+// absent from this WDK's ntoskrnl.lib/wdmsec.lib import stubs, so it cannot
+// be statically linked here. Resolved dynamically at runtime instead, the
+// same way PsGetNextProcess is resolved below.
+const IO_CREATE_DEVICE_SECURE_NAME: [u16; 21] = ascii_to_utf16("IoCreateDeviceSecure");
 
 type PsGetNextProcessFn = unsafe extern "system" fn(PEPROCESS) -> PEPROCESS;
+type IoCreateDeviceSecureFn = unsafe extern "system" fn(
+    *mut u8,
+    ULONG,
+    PUNICODE_STRING,
+    ULONG,
+    ULONG,
+    u8,
+    PUNICODE_STRING,
+    PVOID,
+    *mut PDEVICE_OBJECT,
+) -> NTSTATUS;
 
 use ioctls::GetLocationResponse;
 
@@ -191,12 +194,16 @@ unsafe fn ustr(buf: &[u16]) -> UNICODE_STRING {
 
 #[export_name = "DriverEntry"]
 pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> NTSTATUS {
+    let Some(io_create_device_secure) = resolve_io_create_device_secure() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+
     let mut nt = ustr(DEVICE_NT);
     let mut dos = ustr(&DEVICE_DOS);
     let mut sddl = ustr(DEVICE_SDDL);
     let mut dev: PDEVICE_OBJECT = core::ptr::null_mut();
 
-    let s = IoCreateDeviceSecure(
+    let s = io_create_device_secure(
         drv,
         0,
         &mut nt,
@@ -364,6 +371,18 @@ unsafe fn resolve_ps_get_next_process() -> Option<PsGetNextProcessFn> {
         None
     } else {
         Some(core::mem::transmute::<PVOID, PsGetNextProcessFn>(routine))
+    }
+}
+
+unsafe fn resolve_io_create_device_secure() -> Option<IoCreateDeviceSecureFn> {
+    let mut name = ustr(&IO_CREATE_DEVICE_SECURE_NAME);
+    let routine = MmGetSystemRoutineAddress(&mut name);
+    if routine.is_null() {
+        None
+    } else {
+        Some(core::mem::transmute::<PVOID, IoCreateDeviceSecureFn>(
+            routine,
+        ))
     }
 }
 
