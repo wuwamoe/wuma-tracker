@@ -40,6 +40,9 @@
       "entitlements": "entitlements.plist"
     },
     "windows": {
+      "certificateThumbprint": "B9487CB38D51E2201079B302963AC0E41EE1B933",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://time.certum.pl",
       "wix": {
         "language": "ko-KR",
         "template": "./windows/fragments/main.wxs"
