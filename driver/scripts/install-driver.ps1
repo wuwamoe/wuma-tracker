@@ -44,16 +44,47 @@ $SysPath = (Resolve-Path $SysPath).Path
 $existing = sc.exe query $ServiceName 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "기존 서비스 발견, 중지+삭제 후 재설치합니다." -ForegroundColor Yellow
+
+    # 헬퍼가 디바이스 핸들을 열어둔 채로 떠 있으면 드라이버 언로드가 끝나지 않아
+    # 서비스가 "삭제 대기(marked for deletion, exit 1072)" 상태로 걸릴 수 있다.
+    Stop-Process -Name wuma_tracker_helper -Force -ErrorAction SilentlyContinue
+
     sc.exe stop $ServiceName | Out-Null
-    Start-Sleep -Milliseconds 500
+
+    # sc stop은 비동기다: 실제로 STOPPED가 될 때까지 폴링하지 않으면 뒤이은
+    # delete가 "아직 멈추는 중" 상태의 서비스에 대해 실행되어 1072로 걸릴 수 있다.
+    $stopped = $false
+    for ($i = 0; $i -lt 20; $i++) {
+        $state = (sc.exe query $ServiceName 2>$null) -join "`n"
+        if ($state -match "STOPPED") { $stopped = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $stopped) {
+        Write-Warning "서비스가 10초 안에 STOPPED 상태가 되지 않았습니다. 계속 진행하지만 재부팅이 필요할 수 있습니다."
+    }
+
     sc.exe delete $ServiceName | Out-Null
-    Start-Sleep -Milliseconds 500
+
+    # delete도 비동기라 SCM 데이터베이스에서 완전히 제거될 때까지 약간의 지연이
+    # 있을 수 있다. 다음 create가 1072로 실패하지 않도록 짧게 재시도한다.
+    for ($i = 0; $i -lt 10; $i++) {
+        sc.exe query $ServiceName 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 Write-Host "서비스 등록: $ServiceName (파일: $SysPath)" -ForegroundColor Cyan
-sc.exe create $ServiceName type= kernel start= demand error= normal binPath= "$SysPath"
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "sc create 실패 (exit $LASTEXITCODE). 테스트 서명 모드가 켜져 있는지 확인하세요 (bcdedit /set testsigning on 후 재부팅)."
+$created = $false
+for ($i = 0; $i -lt 6; $i++) {
+    sc.exe create $ServiceName type= kernel start= demand error= normal binPath= "$SysPath"
+    if ($LASTEXITCODE -eq 0) { $created = $true; break }
+    if ($LASTEXITCODE -ne 1072) { break }
+    Write-Host "서비스가 아직 삭제 대기 중 (1072), 재시도..." -ForegroundColor Yellow
+    Start-Sleep -Milliseconds 500
+}
+if (-not $created) {
+    Write-Error "sc create 실패 (exit $LASTEXITCODE). 1072(삭제 대기)가 계속되면 재부팅이 필요할 수 있고, 그 외에는 테스트 서명 모드가 켜져 있는지 확인하세요 (bcdedit /set testsigning on 후 재부팅)."
     exit 1
 }
 
