@@ -61,6 +61,17 @@ try {
     }
 
     Write-Host "stage=$stage ($stageDesc)" -ForegroundColor Cyan
+    if ($stage -eq 254) {
+        # Bit-exact decode (not the lossy float value) of FindProcessDebug.
+        # Uses GetBytes/ToUInt32 rather than SingleToUInt32Bits for
+        # compatibility with both Windows PowerShell 5.1 and PowerShell 7+.
+        $dbgStatus = [BitConverter]::ToInt32([BitConverter]::GetBytes($x), 0)
+        $dbgActualLen = [BitConverter]::ToUInt32([BitConverter]::GetBytes($y), 0)
+        $dbgFirstNextEntryOffset = [BitConverter]::ToUInt32([BitConverter]::GetBytes($z), 0)
+        $dbgSeen = [BitConverter]::ToUInt32([BitConverter]::GetBytes($pitch), 0)
+        $dbgFirstDwordAfterCall = [BitConverter]::ToUInt32([BitConverter]::GetBytes($yaw), 0)
+        Write-Host ("debug: status=0x{0:X8} actual_len={1} first_next_entry_offset={2} seen={3} first_dword_after_call=0x{4:X8}" -f $dbgStatus, $dbgActualLen, $dbgFirstNextEntryOffset, $dbgSeen, $dbgFirstDwordAfterCall) -ForegroundColor Yellow
+    }
     if ($stage -eq 0) {
         Write-Host ("x={0} y={1} z={2} pitch={3} yaw={4} roll={5}" -f $x, $y, $z, $pitch, $yaw, $roll) -ForegroundColor Green
     }

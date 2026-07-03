@@ -115,7 +115,8 @@ Write-Host "[1/6] EWDK 빌드 환경 로드 중 ($EwdkRoot, $Arch)..." -Foregrou
 $envDumpFile = New-TemporaryFile
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-cmd /c "`"$setupBuildEnv`" $Arch && set" > $envDumpFile.FullName 2>&1
+$cmdLine = "call `"$setupBuildEnv`" $Arch >nul && set"
+cmd.exe /d /s /c $cmdLine > $envDumpFile.FullName 2>&1
 $ErrorActionPreference = $prevEap
 
 $envVars = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
@@ -124,11 +125,51 @@ Get-Content $envDumpFile.FullName | ForEach-Object {
         $envVars[$matches[1]] = $matches[2]
     }
 }
-Remove-Item $envDumpFile.FullName -ErrorAction SilentlyContinue
 
 if (-not $envVars.ContainsKey("WDKContentRoot") -or -not $envVars.ContainsKey("Version_Number")) {
-    Fail "EWDK 환경 변수(WDKContentRoot/Version_Number)를 읽지 못했습니다. SetupBuildEnv.cmd 출력을 확인하세요."
+    Write-Warning "SetupBuildEnv.cmd 환경 덤프를 읽지 못했습니다. EWDK 트리에서 빌드 환경을 직접 구성합니다."
+    $sdkRootFallback = Join-Path $EwdkRoot "Program Files\Windows Kits\10"
+    $sdkVersionDirFallback = Get-ChildItem (Join-Path $sdkRootFallback "Include") -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+    if (-not $sdkVersionDirFallback) {
+        $envDumpPreview = (Get-Content $envDumpFile.FullName -ErrorAction SilentlyContinue | Select-Object -First 40) -join "`n"
+        Remove-Item $envDumpFile.FullName -ErrorAction SilentlyContinue
+        Fail "EWDK SDK 버전을 찾지 못했습니다. SetupBuildEnv.cmd 출력:`n$envDumpPreview"
+    }
+
+    $msvcToolsRootFallback = Join-Path $EwdkRoot "Program Files\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC"
+    $msvcVersionDirFallback = Get-ChildItem $msvcToolsRootFallback -Directory |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+    if (-not $msvcVersionDirFallback) {
+        Fail "MSVC 툴셋을 찾지 못했습니다: $msvcToolsRootFallback"
+    }
+
+    $envVars["WDKContentRoot"] = "$sdkRootFallback\"
+    $envVars["Version_Number"] = $sdkVersionDirFallback.Name
+    $envVars["PATH"] = @(
+        (Join-Path $msvcVersionDirFallback.FullName "bin\Hostx64\x64"),
+        (Join-Path $sdkRootFallback "bin\x64"),
+        (Join-Path $sdkRootFallback "Tools\$($sdkVersionDirFallback.Name)\x64"),
+        $env:Path
+    ) -join ";"
+    $envVars["INCLUDE"] = @(
+        (Join-Path $msvcVersionDirFallback.FullName "include"),
+        (Join-Path $sdkRootFallback "Include\$($sdkVersionDirFallback.Name)\km"),
+        (Join-Path $sdkRootFallback "Include\$($sdkVersionDirFallback.Name)\shared"),
+        (Join-Path $sdkRootFallback "Include\$($sdkVersionDirFallback.Name)\ucrt"),
+        (Join-Path $sdkRootFallback "Include\$($sdkVersionDirFallback.Name)\um")
+    ) -join ";"
+    $envVars["LIB"] = @(
+        (Join-Path $sdkRootFallback "Lib\$($sdkVersionDirFallback.Name)\km\x64"),
+        (Join-Path $sdkRootFallback "Lib\$($sdkVersionDirFallback.Name)\um\x64"),
+        (Join-Path $sdkRootFallback "Lib\$($sdkVersionDirFallback.Name)\ucrt\x64"),
+        (Join-Path $msvcVersionDirFallback.FullName "lib\x64")
+    ) -join ";"
 }
+Remove-Item $envDumpFile.FullName -ErrorAction SilentlyContinue
 
 foreach ($key in $envVars.Keys) {
     if ($key -ieq "Path" -and $envVars.ContainsKey("PATH")) {
