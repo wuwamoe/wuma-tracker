@@ -1,0 +1,32 @@
+[package]
+name = "wuma-tracker-driver"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wuma_tracker_driver"
+path = "src/main.rs"
+
+[dependencies]
+wdk = "0.3.0"
+wdk-sys = "0.3.0"
+wdk-macros = "0.3.0"
+# no_std 삼각함수
+libm = { version = "0.2", default-features = false }
+
+[build-dependencies]
+wdk-build = "0.3.0"
+
+[profile.dev]
+panic = "abort"
+lto = false
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 2
+codegen-units = 1
+
+# WDK 드라이버 모델 지정 — wdk-build가 요구하는 메타데이터
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"

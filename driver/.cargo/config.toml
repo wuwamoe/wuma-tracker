@@ -1,0 +1,15 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    # 커널 드라이버 링커 플래그
+    "-C", "link-arg=/DRIVER",
+    "-C", "link-arg=/SUBSYSTEM:NATIVE",
+    "-C", "link-arg=/NODEFAULTLIB",
+    "-C", "link-arg=/ENTRY:DriverEntry",
+    "-C", "link-arg=/MERGE:.rdata=.text",
+    "-C", "link-arg=/INTEGRITYCHECK",
+    # static CRT — 커널 드라이버 필수 (/MT)
+    "-C", "target-feature=+crt-static",
+]
