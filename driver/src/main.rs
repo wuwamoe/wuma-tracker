@@ -17,14 +17,34 @@ use wdk_sys::{
     ntddk::{
         ExAllocatePool2, ExFreePoolWithTag, IoCreateSymbolicLink, IoDeleteDevice,
         IoDeleteSymbolicLink, IofCompleteRequest, ObDereferenceObjectDeferDelete,
+        PsLookupProcessByProcessId,
     },
-    DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, FILE_DEVICE_UNKNOWN, NTSTATUS, PDEVICE_OBJECT,
-    PEPROCESS, PIRP, PUNICODE_STRING, PVOID, SIZE_T, ULONG, ULONG64, ULONG_PTR, UNICODE_STRING,
+    DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, FILE_DEVICE_UNKNOWN, HANDLE, NTSTATUS,
+    PDEVICE_OBJECT, PEPROCESS, PIRP, PUNICODE_STRING, PVOID, SIZE_T, ULONG, ULONG64, ULONG_PTR,
+    UNICODE_STRING,
 };
 
 #[used]
 #[link_section = ".rdata"]
 static WUMATRACKER_PURPOSE: &str = "WumaTracker Player Position Service; reads only player world coordinates for the legitimate WumaTracker overlay service; no write, no generic pattern scan, no generic memory access, no runtime configuration.";
+
+extern "system" {
+    // Variadic kernel-mode logging function (ntoskrnl.exe export); not bound
+    // by wdk_sys because bindgen can't represent C varargs. Only ever called
+    // here with a single "%s" + pre-formatted, NUL-terminated string, so the
+    // System calling convention/varargs ABI mismatch risk is a non-issue.
+    fn DbgPrint(Format: *const u8, ...) -> i32;
+}
+
+/// Debug-only pointer-chain tracing for `read_player_world_position`, visible
+/// via DebugView/WinDbg (`Sysinternals DebugView` with "Capture Kernel"
+/// enabled, or `!dbgprint`). Remove once the chain offsets are confirmed
+/// working against a live game process.
+unsafe fn klog(msg: alloc::string::String) {
+    let mut buf = msg.into_bytes();
+    buf.push(0);
+    DbgPrint(b"[wuma-tracker] %s\0".as_ptr(), buf.as_ptr());
+}
 
 const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
@@ -33,7 +53,12 @@ const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 const STATUS_NOT_FOUND: NTSTATUS = 0xC000_0225u32 as i32;
 
 const POOL_FLAG_NON_PAGED: ULONG64 = 0x40;
-const MM_COPY_MEMORY_VIRTUAL: ULONG = 0x1;
+// wdm.h: MM_COPY_MEMORY_PHYSICAL = 0x1, MM_COPY_MEMORY_VIRTUAL = 0x2. This was
+// previously 0x1 (the PHYSICAL flag), which told MmCopyMemory to treat every
+// `MmCopyAddr.va` as a physical address instead of a virtual one — every
+// single kread() failed with STATUS_PARTIAL_COPY regardless of how correct
+// the target virtual address was, which is exactly the symptom that led here.
+const MM_COPY_MEMORY_VIRTUAL: ULONG = 0x2;
 const POOL_TAG: ULONG = u32::from_le_bytes(*b"WuDr");
 const ALLOC_TAG: u32 = u32::from_le_bytes(*b"WuAl");
 // WumaTracker-specific bugcheck code, used only by our own panic handler; not a
@@ -42,12 +67,19 @@ const WUMATRACKER_BUGCHECK_CODE: ULONG = u32::from_le_bytes(*b"WuBC");
 
 const IRP_IO_STATUS: usize = 0x30;
 const IRP_IO_INFORMATION: usize = 0x38;
-const IRP_SYSTEM_BUFFER: usize = 0x70;
+const IRP_SYSTEM_BUFFER: usize = 0x18;
 const IRP_CURRENT_STACK: usize = 0xB8;
-const STACK_IOCTL_CODE: usize = 0x08;
+// IO_STACK_LOCATION.Parameters.DeviceIoControl layout (Parameters starts at
+// +0x08 in IO_STACK_LOCATION): OutputBufferLength, then InputBufferLength
+// (POINTER_ALIGNMENT-padded to +0x08), then IoControlCode (+0x10). These were
+// previously swapped (IOCTL_CODE and OUT_LEN), so dispatch_ioctl's `code`
+// read OutputBufferLength instead of the real IOCTL code, meaning
+// IOCTL_GET_LOCATION never matched and on_get_location never ran.
+const STACK_OUT_LEN: usize = 0x08;
 const STACK_IN_LEN: usize = 0x10;
-const STACK_OUT_LEN: usize = 0x18;
+const STACK_IOCTL_CODE: usize = 0x18;
 
+const DEVICE_OBJECT_FLAGS: usize = 0x30;
 const DRV_DEVICE_OBJECT: usize = 0x08;
 const DRV_UNLOAD: usize = 0x68;
 const DRV_MAJOR_FUNCTION: usize = 0x70;
@@ -56,7 +88,6 @@ use ioctls::IOCTL_GET_LOCATION;
 
 const USER_MIN: u64 = 0x1_0000;
 const USER_MAX: u64 = 0x7FFF_FFFF_FFFF;
-const PEB_IMAGE_BASE_ADDRESS: u64 = 0x10;
 const GWORLD_PATTERN_PREFIX: &[u8] = &[0x48, 0x8B, 0x1D];
 const GWORLD_PATTERN_SUFFIX: &[u8] = &[0x48, 0x85, 0xDB, 0x74, 0xFF, 0x41, 0xB0, 0x01];
 
@@ -73,22 +104,18 @@ const fn ascii_to_utf16<const N: usize>(s: &str) -> [u16; N] {
     }
     out
 }
-const TARGET_PROCESS_NAME_UTF16: [u16; 25] = ascii_to_utf16(ioctls::TARGET_PROCESS_NAME);
+const TARGET_PROCESS_NAME_UTF16: [u16; 26] = ascii_to_utf16(ioctls::TARGET_PROCESS_NAME);
 
 struct PlayerCoordConfig {
-    fallback_gworld_rva: u64,
     chain: [u64; 6],
-    transform_offset: u64,
-    origin_chain: [u64; 1],
-    origin_offset: u64,
+    relative_location_offset: u64,
+    add_world_origin: bool,
 }
 
 static PLAYER_COORD_CONFIG: PlayerCoordConfig = PlayerCoordConfig {
-    fallback_gworld_rva: 157_596_584,
-    chain: [440, 64, 0, 56, 832, 416],
-    transform_offset: 480,
-    origin_chain: [56],
-    origin_offset: 200,
+    chain: [0x180, 0x38, 0, 0x30, 0x2A0, 0x130],
+    relative_location_offset: 0x11C,
+    add_world_origin: false,
 };
 
 #[repr(C)]
@@ -105,12 +132,24 @@ extern "system" {
         Out: *mut SIZE_T,
     ) -> NTSTATUS;
     fn MmGetSystemRoutineAddress(SystemRoutineName: PUNICODE_STRING) -> PVOID;
-    fn PsGetProcessPeb(Process: PEPROCESS) -> *mut u8;
-    fn SeLocateProcessImageName(
-        Process: PEPROCESS,
-        ImageFileName: *mut PUNICODE_STRING,
+    // Long-stable ntoskrnl.exe export (used by the same class of tooling as
+    // Process Hacker/System Informer) that returns EPROCESS::SectionBaseAddress
+    // directly. Preferred over walking Peb->ImageBaseAddress: it needs no
+    // MmCopyMemory into the target's user address space (no attach, no risk
+    // of a partial/failed copy from that page), and it's immune to the
+    // Peb->ImageBaseAddress vs Wow64Process->Peb32->ImageBaseAddress split
+    // that WOW64 processes have.
+    fn PsGetProcessSectionBaseAddress(Process: PEPROCESS) -> *mut u8;
+    // Not part of the wdk-sys ntddk.h binding subset, but a long-documented
+    // (if lightly-documented) NT export used here instead of the undocumented
+    // PsGetNextProcess, which this Windows build's ntoskrnl.exe does not
+    // export at all (confirmed via `dumpbin /exports`).
+    fn ZwQuerySystemInformation(
+        SystemInformationClass: u32,
+        SystemInformation: PVOID,
+        SystemInformationLength: u32,
+        ReturnLength: *mut u32,
     ) -> NTSTATUS;
-    fn ExFreePool(P: PVOID);
     fn KeStackAttachProcess(Process: PEPROCESS, ApcState: *mut u8);
     fn KeUnstackDetachProcess(ApcState: *mut u8);
     fn KeBugCheckEx(
@@ -127,10 +166,6 @@ static DEVICE_NT: &[u16] = &[
     0x6C, 0x61, 0x79, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0,
 ];
 static DEVICE_DOS: [u16; 31] = ascii_to_utf16(ioctls::DEVICE_SYMBOLIC_LINK_NAME);
-static PS_GET_NEXT_PROCESS_NAME: &[u16] = &[
-    0x50, 0x73, 0x47, 0x65, 0x74, 0x4E, 0x65, 0x78, 0x74, 0x50, 0x72, 0x6F, 0x63, 0x65, 0x73, 0x73,
-    0,
-];
 // SDDL "D:P(A;;GA;;;BA)(A;;GA;;;SY)": Administrators (BA) and SYSTEM (SY) get
 // generic-all access; everyone else is denied. Protected (P) so it cannot be
 // widened by an inherited ACE.
@@ -140,11 +175,9 @@ static DEVICE_SDDL: &[u16] = &[
 ];
 // IoCreateDeviceSecure is a real WDM export (documented since Vista) but is
 // absent from this WDK's ntoskrnl.lib/wdmsec.lib import stubs, so it cannot
-// be statically linked here. Resolved dynamically at runtime instead, the
-// same way PsGetNextProcess is resolved below.
+// be statically linked here. Resolved dynamically at runtime instead.
 const IO_CREATE_DEVICE_SECURE_NAME: [u16; 21] = ascii_to_utf16("IoCreateDeviceSecure");
 
-type PsGetNextProcessFn = unsafe extern "system" fn(PEPROCESS) -> PEPROCESS;
 type IoCreateDeviceSecureFn = unsafe extern "system" fn(
     *mut u8,
     ULONG,
@@ -176,6 +209,26 @@ struct FIntVector {
     x: i32,
     y: i32,
     z: i32,
+}
+
+#[repr(C)]
+struct FVector {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[repr(C)]
+struct FRotator {
+    pitch: f32,
+    yaw: f32,
+    roll: f32,
+}
+
+#[repr(C)]
+struct FRelativeTransform {
+    location: FVector,
+    rotation: FRotator,
 }
 
 #[inline]
@@ -223,7 +276,7 @@ pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> 
         return s;
     }
 
-    let flags = (dev as *mut u8).add(0x1C) as *mut u32;
+    let flags = (dev as *mut u8).add(DEVICE_OBJECT_FLAGS) as *mut u32;
     *flags = (*flags | DO_BUFFERED_IO) & !DO_DEVICE_INITIALIZING;
 
     let mf = drv.add(DRV_MAJOR_FUNCTION) as *mut usize;
@@ -272,8 +325,17 @@ unsafe fn complete(irp: PIRP, status: NTSTATUS, info: usize) -> NTSTATUS {
 }
 
 unsafe fn kread(proc: PEPROCESS, addr: u64, out: *mut u8, len: usize) -> bool {
-    let mut apc = [0u8; 72];
-    KeStackAttachProcess(proc, apc.as_mut_ptr());
+    // KAPC_STATE is made up of pointer-sized/LIST_ENTRY fields that the
+    // kernel's attach/detach routines assume are naturally aligned. A plain
+    // `[u8; N]` only guarantees 1-byte alignment, so on an unlucky stack
+    // layout KeStackAttachProcess's internal bookkeeping can end up
+    // corrupted, silently failing to actually attach — every subsequent
+    // MmCopyMemory then runs in the *caller's* address space instead of the
+    // target's, failing regardless of how correct `addr` is.
+    #[repr(C, align(16))]
+    struct ApcState([u8; 72]);
+    let mut apc = ApcState([0u8; 72]);
+    KeStackAttachProcess(proc, apc.0.as_mut_ptr());
     let mut copied: SIZE_T = 0;
     let s = MmCopyMemory(
         out as PVOID,
@@ -282,8 +344,15 @@ unsafe fn kread(proc: PEPROCESS, addr: u64, out: *mut u8, len: usize) -> bool {
         MM_COPY_MEMORY_VIRTUAL,
         &mut copied,
     );
-    KeUnstackDetachProcess(apc.as_mut_ptr());
-    s == STATUS_SUCCESS && copied == len as SIZE_T
+    KeUnstackDetachProcess(apc.0.as_mut_ptr());
+    let ok = s == STATUS_SUCCESS && copied == len as SIZE_T;
+    if !ok {
+        klog(alloc::format!(
+            "kread(addr=0x{:016X}, len={}) MmCopyMemory status=0x{:08X} copied={}",
+            addr, len, s as u32, copied
+        ));
+    }
+    ok
 }
 
 unsafe fn kread_ptr(proc: PEPROCESS, addr: u64) -> Option<u64> {
@@ -306,14 +375,6 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
         return (STATUS_BUFFER_TOO_SMALL, 0);
     }
 
-    let proc = match find_target_process() {
-        Some(proc) => proc,
-        None => return (STATUS_NOT_FOUND, 0),
-    };
-
-    let result = read_player_world_position(proc);
-    ObDereferenceObjectDeferDelete(proc as PVOID);
-
     let r = &mut *(buf as *mut GetLocationResponse);
     *r = GetLocationResponse {
         x: 0.0,
@@ -326,6 +387,24 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
         _pad: [0; 3],
     };
 
+    let proc = match find_target_process() {
+        Ok(proc) => proc,
+        Err(dbg) => {
+            // Bit-exact (not lossy-cast) so the real i32/u32 values survive
+            // the f32 field round-trip for inspection without a debugger.
+            r.x = f32::from_bits(dbg.status as u32);
+            r.y = f32::from_bits(dbg.actual_len);
+            r.z = f32::from_bits(dbg.first_next_entry_offset);
+            r.pitch = f32::from_bits(dbg.seen);
+            r.yaw = f32::from_bits(dbg.first_dword_after_call);
+            r.stage = 0xFE;
+            return (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>());
+        }
+    };
+
+    let result = read_player_world_position(proc);
+    ObDereferenceObjectDeferDelete(proc as PVOID);
+
     match result {
         Ok((x, y, z, p, yw, rl)) => {
             r.x = x;
@@ -337,41 +416,176 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
             (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>())
         }
         Err(stage) => {
+            // Buffered I/O only copies the system buffer back to the caller
+            // when the IRP completes with a success status, so a non-success
+            // status here would discard `stage` entirely (DeviceIoControl
+            // reports 0 bytes returned and Win32 error 31/ERROR_GEN_FAILURE).
+            // The real per-stage failure is carried in-band via `stage`
+            // instead, so the IOCTL itself always succeeds.
             r.stage = stage;
-            (
-                STATUS_UNSUCCESSFUL,
-                core::mem::size_of::<GetLocationResponse>(),
-            )
+            (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>())
         }
     }
 }
 
-unsafe fn find_target_process() -> Option<PEPROCESS> {
-    let ps_get_next_process = resolve_ps_get_next_process()?;
-    let mut cursor: PEPROCESS = core::ptr::null_mut();
+// SYSTEM_INFORMATION_CLASS::SystemProcessInformation.
+const SYSTEM_PROCESS_INFORMATION_CLASS: u32 = 5;
+const STATUS_INFO_LENGTH_MISMATCH: NTSTATUS = 0xC000_0004u32 as i32;
+
+// Offsets into each SYSTEM_PROCESS_INFORMATION record. Stable across Windows
+// versions for this portion of the struct (relied on by process-listing
+// tools like Process Hacker/System Informer for well over a decade):
+//   +0x00 NextEntryOffset : ULONG
+//   +0x38 ImageName       : UNICODE_STRING (bare file name, not truncated)
+//   +0x50 UniqueProcessId : HANDLE
+const SPI_NEXT_ENTRY_OFFSET: usize = 0x00;
+const SPI_IMAGE_NAME: usize = 0x38;
+const SPI_UNIQUE_PROCESS_ID: usize = 0x50;
+
+/// Enumerates processes via `ZwQuerySystemInformation(SystemProcessInformation)`
+/// and looks up the first one whose image name matches the hardcoded target,
+/// returning a referenced `PEPROCESS` via `PsLookupProcessByProcessId`.
+///
+/// `PsGetNextProcess` (the more commonly seen approach in community driver
+/// samples) is deliberately not used here: it is an undocumented internal
+/// routine, and this Windows build's ntoskrnl.exe does not export it at all
+/// (confirmed via `dumpbin /exports`), so relying on it would silently
+/// prevent the target process from ever being found on such builds. This
+/// matches the documented approach the driver plan calls for.
+/// Temporary rich diagnostics for find_target_process's failure path,
+/// surfaced bit-exact (via f32::from_bits, not a lossy numeric cast) through
+/// the response's x/y/z/pitch fields so it can be inspected without a kernel
+/// debugger attached. Remove once process lookup is confirmed working.
+#[derive(Clone, Copy)]
+struct FindProcessDebug {
+    status: NTSTATUS,
+    actual_len: u32,
+    first_next_entry_offset: u32,
+    seen: u32,
+    /// buf's first dword right after the ZwQuerySystemInformation call.
+    /// Compared against the 0xCAFEBABE canary written just before the call:
+    /// if it's still 0xCAFEBABE, the call never actually wrote to the
+    /// buffer at all.
+    first_dword_after_call: u32,
+}
+
+unsafe fn find_target_process() -> Result<PEPROCESS, FindProcessDebug> {
+    let mut buf_len: u32 = 64 * 1024;
+    let mut buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, buf_len as SIZE_T, POOL_TAG) as *mut u8;
+    if buf.is_null() {
+        return Err(FindProcessDebug {
+            status: -1,
+            actual_len: 0,
+            first_next_entry_offset: 0,
+            seen: 0,
+            first_dword_after_call: 0,
+        });
+    }
+
+    // Canaries to tell "the call never touched these" apart from "the call
+    // legitimately wrote zero": if these come back unchanged, the call site
+    // isn't actually reaching the real routine at all.
+    let mut actual_len: u32 = 0xDEAD_BEEF;
+    *(buf as *mut u32) = 0xCAFE_BABE;
+    let mut status = ZwQuerySystemInformation(
+        SYSTEM_PROCESS_INFORMATION_CLASS,
+        buf as PVOID,
+        buf_len,
+        &mut actual_len,
+    );
+    let first_dword_after_call = *(buf as *const u32);
+    let mut retries = 0;
+    while status == STATUS_INFO_LENGTH_MISMATCH && retries < 8 {
+        ExFreePoolWithTag(buf as PVOID, POOL_TAG);
+        buf_len = actual_len.saturating_add(4096);
+        buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, buf_len as SIZE_T, POOL_TAG) as *mut u8;
+        if buf.is_null() {
+            return Err(FindProcessDebug {
+                status: -2,
+                actual_len,
+                first_next_entry_offset: 0,
+                seen: 0,
+                first_dword_after_call: 0,
+            });
+        }
+        status = ZwQuerySystemInformation(
+            SYSTEM_PROCESS_INFORMATION_CLASS,
+            buf as PVOID,
+            buf_len,
+            &mut actual_len,
+        );
+        retries += 1;
+    }
+
+    if status != STATUS_SUCCESS {
+        ExFreePoolWithTag(buf as PVOID, POOL_TAG);
+        return Err(FindProcessDebug {
+            status,
+            actual_len,
+            first_next_entry_offset: 0,
+            seen: 0,
+            first_dword_after_call,
+        });
+    }
+
+    let first_next_entry_offset = *(buf.add(SPI_NEXT_ENTRY_OFFSET) as *const u32);
+
+    let mut seen = 0u32;
+    let mut offset = 0usize;
+    let mut matched_pid: Option<HANDLE> = None;
     loop {
-        let next = ps_get_next_process(cursor);
-        if !cursor.is_null() {
-            ObDereferenceObjectDeferDelete(cursor as PVOID);
-        }
-        if next.is_null() {
-            return None;
-        }
-        if process_image_name_matches(next) {
-            return Some(next);
-        }
-        cursor = next;
-    }
-}
+        let entry = buf.add(offset);
+        let next_entry_offset = *(entry.add(SPI_NEXT_ENTRY_OFFSET) as *const u32);
+        let image_name = &*(entry.add(SPI_IMAGE_NAME) as *const UNICODE_STRING);
 
-unsafe fn resolve_ps_get_next_process() -> Option<PsGetNextProcessFn> {
-    let mut name = ustr(PS_GET_NEXT_PROCESS_NAME);
-    let routine = MmGetSystemRoutineAddress(&mut name);
-    if routine.is_null() {
-        None
-    } else {
-        Some(core::mem::transmute::<PVOID, PsGetNextProcessFn>(routine))
+        if !image_name.Buffer.is_null() {
+            seen = seen.wrapping_add(1);
+            if unicode_path_ends_with_target(image_name) {
+                let pid = *(entry.add(SPI_UNIQUE_PROCESS_ID) as *const HANDLE);
+                let name_len = (image_name.Length / 2) as usize;
+                let name: alloc::string::String = core::slice::from_raw_parts(image_name.Buffer, name_len)
+                    .iter()
+                    .map(|&c| if c < 128 { c as u8 as char } else { '?' })
+                    .collect();
+                klog(alloc::format!(
+                    "find_target_process: matched pid={:?} image_name=\"{}\"",
+                    pid, name
+                ));
+                matched_pid = Some(pid);
+                break;
+            }
+        }
+
+        if next_entry_offset == 0 {
+            break;
+        }
+        offset += next_entry_offset as usize;
     }
+
+    ExFreePoolWithTag(buf as PVOID, POOL_TAG);
+
+    let Some(pid) = matched_pid else {
+        return Err(FindProcessDebug {
+            status,
+            actual_len,
+            first_next_entry_offset,
+            seen,
+            first_dword_after_call,
+        });
+    };
+
+    let mut proc: PEPROCESS = core::ptr::null_mut();
+    let lookup_status = PsLookupProcessByProcessId(pid, &mut proc);
+    if lookup_status != STATUS_SUCCESS || proc.is_null() {
+        return Err(FindProcessDebug {
+            status: lookup_status,
+            actual_len,
+            first_next_entry_offset,
+            seen,
+            first_dword_after_call,
+        });
+    }
+    Ok(proc)
 }
 
 unsafe fn resolve_io_create_device_secure() -> Option<IoCreateDeviceSecureFn> {
@@ -386,26 +600,15 @@ unsafe fn resolve_io_create_device_secure() -> Option<IoCreateDeviceSecureFn> {
     }
 }
 
-unsafe fn process_image_name_matches(proc: PEPROCESS) -> bool {
-    let mut image_name: PUNICODE_STRING = core::ptr::null_mut();
-    let status = SeLocateProcessImageName(proc, &mut image_name);
-    if image_name.is_null() {
-        return false;
-    }
-
-    let matched = status == STATUS_SUCCESS && unicode_path_ends_with_target(&*image_name);
-    ExFreePool(image_name as PVOID);
-    matched
-}
-
 unsafe fn unicode_path_ends_with_target(name: &UNICODE_STRING) -> bool {
     let len = (name.Length / 2) as usize;
-    if name.Buffer.is_null() || len < TARGET_PROCESS_NAME_UTF16.len() {
+    let target_len = TARGET_PROCESS_NAME_UTF16.len() - 1;
+    if name.Buffer.is_null() || len < target_len {
         return false;
     }
     let chars = core::slice::from_raw_parts(name.Buffer, len);
-    let start = len - TARGET_PROCESS_NAME_UTF16.len();
-    for i in 0..TARGET_PROCESS_NAME_UTF16.len() {
+    let start = len - target_len;
+    for i in 0..target_len {
         if to_ascii_lower_u16(chars[start + i]) != to_ascii_lower_u16(TARGET_PROCESS_NAME_UTF16[i])
         {
             return false;
@@ -425,62 +628,137 @@ const fn to_ascii_lower_u16(ch: u16) -> u16 {
 unsafe fn read_player_world_position(
     proc: PEPROCESS,
 ) -> Result<(f32, f32, f32, f32, f32, f32), u8> {
-    let base = read_main_module_base(proc).ok_or(1u8)?;
-    let anchor_rva =
-        find_hardcoded_gworld_anchor(proc, base).unwrap_or(PLAYER_COORD_CONFIG.fallback_gworld_rva);
-    let anchor = kread_ptr(proc, base + anchor_rva).ok_or(1u8)?;
+    use alloc::format;
+
+    let Some(base) = read_main_module_base(proc) else {
+        klog("stage=1 FAILED: read_main_module_base returned None".into());
+        return Err(1u8);
+    };
+    klog(format!("base=0x{:016X}", base));
+
+    let Some(anchor_rva) = find_hardcoded_gworld_anchor(proc, base) else {
+        klog("stage=1 FAILED: find_hardcoded_gworld_anchor pattern scan found nothing (no fallback)".into());
+        return Err(1u8);
+    };
+    klog(format!("anchor_rva=0x{:X} (scanned)", anchor_rva));
+
+    let Some(anchor) = kread_ptr(proc, base + anchor_rva) else {
+        klog(format!(
+            "stage=1 FAILED: kread_ptr(base+anchor_rva=0x{:016X}) returned None (gworld ptr unreadable/invalid)",
+            base + anchor_rva
+        ));
+        return Err(1u8);
+    };
+    klog(format!("gworld=0x{:016X}", anchor));
 
     let mut ptr = anchor;
     for i in 0..PLAYER_COORD_CONFIG.chain.len() {
-        ptr = kread_ptr(proc, ptr + PLAYER_COORD_CONFIG.chain[i]).ok_or((i + 2) as u8)?;
+        let addr = ptr + PLAYER_COORD_CONFIG.chain[i];
+        let Some(next) = kread_ptr(proc, addr) else {
+            klog(format!(
+                "stage={} FAILED: chain[{}] kread_ptr(prev=0x{:016X} + off=0x{:X} = 0x{:016X}) returned None",
+                i + 2,
+                i,
+                ptr,
+                PLAYER_COORD_CONFIG.chain[i],
+                addr
+            ));
+            return Err((i + 2) as u8);
+        };
+        klog(format!(
+            "chain[{}] 0x{:016X} + 0x{:X} -> 0x{:016X}",
+            i, ptr, PLAYER_COORD_CONFIG.chain[i], next
+        ));
+        ptr = next;
     }
 
-    let mut ft = core::mem::MaybeUninit::<FTransform>::uninit();
+    let mut rel = core::mem::MaybeUninit::<FRelativeTransform>::uninit();
+    let rel_addr = ptr + PLAYER_COORD_CONFIG.relative_location_offset;
     if !kread(
         proc,
-        ptr + PLAYER_COORD_CONFIG.transform_offset,
-        ft.as_mut_ptr() as *mut u8,
-        core::mem::size_of::<FTransform>(),
+        rel_addr,
+        rel.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<FRelativeTransform>(),
     ) {
+        klog(format!(
+            "stage={} FAILED: kread(relative_location @ 0x{:016X}, {} bytes) failed",
+            PLAYER_COORD_CONFIG.chain.len() + 2,
+            rel_addr,
+            core::mem::size_of::<FRelativeTransform>()
+        ));
         return Err((PLAYER_COORD_CONFIG.chain.len() + 2) as u8);
     }
-    let ft = ft.assume_init();
+    let rel = rel.assume_init();
+    klog(format!(
+        "relative_location=({}, {}, {}) rotation=({}, {}, {})",
+        rel.location.x,
+        rel.location.y,
+        rel.location.z,
+        rel.rotation.pitch,
+        rel.rotation.yaw,
+        rel.rotation.roll
+    ));
 
-    let mut optr = anchor;
-    for i in 0..PLAYER_COORD_CONFIG.origin_chain.len() {
-        optr = kread_ptr(proc, optr + PLAYER_COORD_CONFIG.origin_chain[i])
-            .ok_or((PLAYER_COORD_CONFIG.chain.len() + 3 + i) as u8)?;
-    }
-    let mut iv = core::mem::MaybeUninit::<FIntVector>::uninit();
-    if !kread(
-        proc,
-        optr + PLAYER_COORD_CONFIG.origin_offset,
-        iv.as_mut_ptr() as *mut u8,
-        core::mem::size_of::<FIntVector>(),
-    ) {
-        return Err(
-            (PLAYER_COORD_CONFIG.chain.len() + PLAYER_COORD_CONFIG.origin_chain.len() + 3) as u8,
-        );
-    }
-    let iv = iv.assume_init();
+    let iv = if PLAYER_COORD_CONFIG.add_world_origin {
+        let persistent_level_addr = anchor + 0x30;
+        let Some(persistent_level) = kread_ptr(proc, persistent_level_addr) else {
+            klog(format!(
+                "stage={} FAILED: kread_ptr(persistent_level @ gworld+0x30 = 0x{:016X}) returned None",
+                PLAYER_COORD_CONFIG.chain.len() + 3,
+                persistent_level_addr
+            ));
+            return Err((PLAYER_COORD_CONFIG.chain.len() + 3) as u8);
+        };
+        klog(format!("persistent_level=0x{:016X}", persistent_level));
 
-    let (roll, pitch, yaw) = quat_to_euler(ft.rx, ft.ry, ft.rz, ft.rw);
+        let mut iv = core::mem::MaybeUninit::<FIntVector>::uninit();
+        let origin_addr = persistent_level + 0xC8;
+        if !kread(
+            proc,
+            origin_addr,
+            iv.as_mut_ptr() as *mut u8,
+            core::mem::size_of::<FIntVector>(),
+        ) {
+            klog(format!(
+                "stage={} FAILED: kread(world_origin @ persistent_level+0xC8 = 0x{:016X}) failed",
+                PLAYER_COORD_CONFIG.chain.len() + 4,
+                origin_addr
+            ));
+            return Err((PLAYER_COORD_CONFIG.chain.len() + 4) as u8);
+        }
+        let iv = iv.assume_init();
+        klog(format!("world_origin=({}, {}, {})", iv.x, iv.y, iv.z));
+        iv
+    } else {
+        FIntVector { x: 0, y: 0, z: 0 }
+    };
+
     Ok((
-        ft.lx + iv.x as f32,
-        ft.ly + iv.y as f32,
-        ft.lz + iv.z as f32,
-        pitch,
-        yaw,
-        roll,
+        rel.location.x + iv.x as f32,
+        rel.location.y + iv.y as f32,
+        rel.location.z + iv.z as f32,
+        rel.rotation.pitch,
+        rel.rotation.yaw,
+        rel.rotation.roll,
     ))
 }
 
 unsafe fn read_main_module_base(proc: PEPROCESS) -> Option<u64> {
-    let peb = PsGetProcessPeb(proc);
-    if peb.is_null() {
+    use alloc::format;
+
+    // Reads EPROCESS::SectionBaseAddress directly instead of walking
+    // Peb->ImageBaseAddress: no attach, no MmCopyMemory into the target's
+    // user address space, so it can't fail with STATUS_PARTIAL_COPY the way
+    // that path did.
+    let raw = PsGetProcessSectionBaseAddress(proc) as u64;
+    if !is_valid_ptr(raw) {
+        klog(format!(
+            "read_main_module_base: PsGetProcessSectionBaseAddress(proc=0x{:016X}) returned invalid value 0x{:016X}",
+            proc as u64, raw
+        ));
         return None;
     }
-    kread_ptr(proc, peb as u64 + PEB_IMAGE_BASE_ADDRESS)
+    Some(raw)
 }
 
 fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {

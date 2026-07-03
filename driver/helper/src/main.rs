@@ -11,16 +11,17 @@
 mod ioctls;
 
 use std::ffi::OsStr;
-use std::io::{Read, Write};
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
 use winapi::shared::minwindef::{DWORD, FALSE};
 use winapi::shared::winerror::ERROR_PIPE_CONNECTED;
-use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING};
+use winapi::um::errhandlingapi::GetLastError;
+use winapi::um::fileapi::{CreateFileW, FlushFileBuffers, ReadFile, WriteFile, OPEN_EXISTING};
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::ioapiset::DeviceIoControl;
+use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
 use winapi::um::namedpipeapi::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe};
 use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
 use winapi::um::securitybaseapi::GetTokenInformation;
@@ -28,7 +29,6 @@ use winapi::um::winbase::{
     LocalFree, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, PIPE_READMODE_MESSAGE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
-use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
 use winapi::um::winnt::{HANDLE, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER};
 
 use ioctls::{GetLocationResponse, DEVICE_NAME, IOCTL_GET_LOCATION};
@@ -49,7 +49,10 @@ extern "system" {
 }
 
 fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// Verifies this binary's own Authenticode signature before doing anything
@@ -59,11 +62,11 @@ fn wide(s: &str) -> Vec<u16> {
 fn verify_self_signature() -> bool {
     use winapi::shared::guiddef::GUID;
     use winapi::shared::minwindef::LPVOID;
+    use winapi::um::wintrust::WinVerifyTrust;
     use winapi::um::wintrust::{
         WINTRUST_DATA, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE,
         WTD_STATEACTION_VERIFY, WTD_UI_NONE,
     };
-    use winapi::um::wintrust::WinVerifyTrust;
 
     let exe_path = match std::env::current_exe() {
         Ok(p) => p,
@@ -85,11 +88,7 @@ fn verify_self_signature() -> bool {
         data.dwStateAction = WTD_STATEACTION_VERIFY;
 
         let mut action_guid: GUID = winapi::um::softpub::WINTRUST_ACTION_GENERIC_VERIFY_V2;
-        let status = WinVerifyTrust(
-            null_mut(),
-            &mut action_guid,
-            &mut data as *mut _ as LPVOID,
-        );
+        let status = WinVerifyTrust(null_mut(), &mut action_guid, &mut data as *mut _ as LPVOID);
 
         data.dwStateAction = WTD_STATEACTION_CLOSE;
         WinVerifyTrust(null_mut(), &mut action_guid, &mut data as *mut _ as LPVOID);
@@ -153,7 +152,9 @@ fn current_user_sid_string() -> Option<String> {
 /// Builds a security descriptor granting only Administrators (BA) and the
 /// caller's own account read/write access, denying everyone else, including
 /// Everyone, Authenticated Users, and remote/anonymous connections.
-fn build_pipe_security_attributes(sd_buf: &mut PSECURITY_DESCRIPTOR) -> Option<SECURITY_ATTRIBUTES> {
+fn build_pipe_security_attributes(
+    sd_buf: &mut PSECURITY_DESCRIPTOR,
+) -> Option<SECURITY_ATTRIBUTES> {
     let user_sid = current_user_sid_string()?;
     let sddl = format!("D:P(A;;GRGW;;;BA)(A;;GRGW;;;{})", user_sid);
     let sddl_w = wide(&sddl);
@@ -191,8 +192,21 @@ fn open_driver() -> Option<HANDLE> {
         )
     };
     if handle == INVALID_HANDLE_VALUE {
+        let err = unsafe { winapi::um::errhandlingapi::GetLastError() };
+        if err == winapi::shared::winerror::ERROR_ACCESS_DENIED {
+            eprintln!(
+                "wuma-tracker-helper: access denied opening {} (helper is not running elevated as Administrator?)",
+                DEVICE_NAME
+            );
+        } else {
+            eprintln!(
+                "wuma-tracker-helper: failed to open {} (Win32 error {})",
+                DEVICE_NAME, err
+            );
+        }
         None
     } else {
+        eprintln!("wuma-tracker-helper: opened {}", DEVICE_NAME);
         Some(handle)
     }
 }
@@ -222,7 +236,7 @@ fn get_location(driver: Option<HANDLE>) -> GetLocationResponse {
     };
 
     let mut returned: DWORD = 0;
-    unsafe {
+    let ok = unsafe {
         DeviceIoControl(
             driver,
             IOCTL_GET_LOCATION,
@@ -232,6 +246,18 @@ fn get_location(driver: Option<HANDLE>) -> GetLocationResponse {
             mem::size_of::<GetLocationResponse>() as DWORD,
             &mut returned,
             null_mut(),
+        )
+    };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        eprintln!(
+            "wuma-tracker-helper: DeviceIoControl(IOCTL_GET_LOCATION) failed (returned={}, error={})",
+            returned, err
+        );
+    } else {
+        eprintln!(
+            "wuma-tracker-helper: DeviceIoControl(IOCTL_GET_LOCATION) ok (returned={})",
+            returned
         );
     }
     // Buffered I/O copies the driver's output buffer back based on the bytes
@@ -246,14 +272,30 @@ fn get_location(driver: Option<HANDLE>) -> GetLocationResponse {
 }
 
 fn serve_client(pipe: HANDLE, driver: Option<HANDLE>) {
-    let mut file = unsafe { <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(pipe as _) };
+    eprintln!("wuma-tracker-helper: client connected");
 
     let mut req = [0u8; 4];
-    if file.read_exact(&mut req).is_err() {
-        std::mem::forget(file);
+    let mut read: DWORD = 0;
+    let read_ok = unsafe {
+        ReadFile(
+            pipe,
+            req.as_mut_ptr() as *mut _,
+            req.len() as DWORD,
+            &mut read,
+            null_mut(),
+        )
+    };
+    if read_ok == 0 || read != req.len() as DWORD {
+        let err = unsafe { GetLastError() };
+        eprintln!(
+            "wuma-tracker-helper: failed to read request from pipe (ok={}, bytes={}, error={})",
+            read_ok, read, err
+        );
         return;
     }
+
     let opcode = u32::from_le_bytes(req);
+    eprintln!("wuma-tracker-helper: request opcode {}", opcode);
 
     if opcode == REQ_GET_LOCATION {
         let resp = get_location(driver);
@@ -263,12 +305,38 @@ fn serve_client(pipe: HANDLE, driver: Option<HANDLE>) {
                 mem::size_of::<GetLocationResponse>(),
             )
         };
-        let _ = file.write_all(bytes);
+        let mut written: DWORD = 0;
+        let write_ok = unsafe {
+            WriteFile(
+                pipe,
+                bytes.as_ptr() as *const _,
+                bytes.len() as DWORD,
+                &mut written,
+                null_mut(),
+            )
+        };
+        if write_ok == 0 || written != bytes.len() as DWORD {
+            let err = unsafe { GetLastError() };
+            eprintln!(
+                "wuma-tracker-helper: failed to write response to pipe (ok={}, bytes={}/{}, error={})",
+                write_ok,
+                written,
+                bytes.len(),
+                err
+            );
+        } else {
+            unsafe {
+                FlushFileBuffers(pipe);
+            }
+            eprintln!(
+                "wuma-tracker-helper: wrote response (stage={}, bytes={})",
+                resp.stage, written
+            );
+        }
+    } else {
+        eprintln!("wuma-tracker-helper: rejected unknown opcode {}", opcode);
     }
-    // Any other opcode is silently ignored and the connection is dropped;
-    // there is no raw IOCTL forwarding and no way to widen the request shape.
-
-    std::mem::forget(file);
+    // There is no raw IOCTL forwarding and no way to widen the request shape.
 }
 
 fn main() {
@@ -289,12 +357,12 @@ fn main() {
     }
 
     let pipe_name_w = wide(PIPE_NAME);
+    eprintln!("wuma-tracker-helper: listening on {}", PIPE_NAME);
 
     loop {
         if driver.is_none() {
             driver = open_driver();
         }
-
 
         let mut sd_buf: PSECURITY_DESCRIPTOR = null_mut();
         let mut sa = match build_pipe_security_attributes(&mut sd_buf) {
