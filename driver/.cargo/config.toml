@@ -9,7 +9,10 @@ rustflags = [
     "-C", "link-arg=/NODEFAULTLIB",
     "-C", "link-arg=/ENTRY:DriverEntry",
     "-C", "link-arg=/MERGE:.rdata=.text",
-    "-C", "link-arg=/INTEGRITYCHECK",
+    # /INTEGRITYCHECK requires the binary to be signed with page hashes
+    # (signtool /ph), which we don't do; without them the OS loader rejects
+    # the image outright. Not required for an ordinary WDM driver, so drop it
+    # rather than switch the signing step to page-hash mode.
     # static CRT — 커널 드라이버 필수 (/MT)
     "-C", "target-feature=+crt-static",
 ]

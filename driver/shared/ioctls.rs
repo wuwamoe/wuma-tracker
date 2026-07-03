@@ -1,4 +1,5 @@
 pub const DEVICE_NAME: &str = r"\\.\WumaDisplayService";
+pub const DEVICE_SYMBOLIC_LINK_NAME: &str = r"\DosDevices\WumaDisplayService";
 pub const TARGET_PROCESS_NAME: &str = "Client-Win64-Shipping.exe";
 
 const fn ctl(function: u32) -> u32 {

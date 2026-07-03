@@ -57,10 +57,13 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+Write-Host "등록된 ImagePath 확인 (sc qc):" -ForegroundColor DarkGray
+sc.exe qc $ServiceName
+
 Write-Host "드라이버 시작 중..." -ForegroundColor Cyan
 sc.exe start $ServiceName
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "sc start 실패 (exit $LASTEXITCODE). 자세한 원인은 이벤트 뷰어(System 로그, Service Control Manager)를 확인하세요."
+    Write-Error "sc start 실패 (exit $LASTEXITCODE). 위 sc qc 출력의 BINARY_PATH_NAME 값을 확인하세요. 자세한 원인은 이벤트 뷰어(System 로그, Service Control Manager)도 참고하세요."
     exit 1
 }
 
