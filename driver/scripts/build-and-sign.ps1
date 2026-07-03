@@ -64,7 +64,7 @@ Write-Host "[1/5] EWDK 빌드 환경 로드 중 ($EwdkRoot, $Arch)..." -Foregrou
 $envDumpFile = New-TemporaryFile
 cmd /c "`"$setupBuildEnv`" $Arch && set" > $envDumpFile.FullName 2>&1
 
-$envVars = @{}
+$envVars = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 Get-Content $envDumpFile.FullName | ForEach-Object {
     if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
         $envVars[$matches[1]] = $matches[2]
@@ -77,7 +77,13 @@ if (-not $envVars.ContainsKey("WDKContentRoot") -or -not $envVars.ContainsKey("V
 }
 
 foreach ($key in $envVars.Keys) {
+    if ($key -ieq "Path" -and $envVars.ContainsKey("PATH")) {
+        continue
+    }
     Set-Item -Path "env:$key" -Value $envVars[$key]
+}
+if ($envVars.ContainsKey("PATH")) {
+    Set-Item -Path "env:Path" -Value $envVars["PATH"]
 }
 
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"

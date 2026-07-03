@@ -90,8 +90,8 @@ extern "system" {
         Flags: ULONG,
         Out: *mut SIZE_T,
     ) -> NTSTATUS;
+    fn MmGetSystemRoutineAddress(SystemRoutineName: PUNICODE_STRING) -> PVOID;
     fn PsGetProcessPeb(Process: PEPROCESS) -> *mut u8;
-    fn PsGetNextProcess(Process: PEPROCESS) -> PEPROCESS;
     fn SeLocateProcessImageName(
         Process: PEPROCESS,
         ImageFileName: *mut PUNICODE_STRING,
@@ -109,6 +109,12 @@ static DEVICE_DOS: &[u16] = &[
     0x5C, 0x5C, 0x2E, 0x5C, 0x57, 0x75, 0x6D, 0x61, 0x44, 0x69, 0x73, 0x70, 0x6C, 0x61, 0x79, 0x53,
     0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0,
 ];
+static PS_GET_NEXT_PROCESS_NAME: &[u16] = &[
+    0x50, 0x73, 0x47, 0x65, 0x74, 0x4E, 0x65, 0x78, 0x74, 0x50, 0x72, 0x6F, 0x63, 0x65, 0x73, 0x73,
+    0,
+];
+
+type PsGetNextProcessFn = unsafe extern "system" fn(PEPROCESS) -> PEPROCESS;
 
 #[repr(C)]
 struct LocationResponse {
@@ -183,17 +189,17 @@ pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> 
     *flags = (*flags | DO_BUFFERED_IO) & !DO_DEVICE_INITIALIZING;
 
     let mf = drv.add(DRV_MAJOR_FUNCTION) as *mut usize;
-    *mf.add(0) = dispatch_ok as usize;
-    *mf.add(2) = dispatch_ok as usize;
-    *mf.add(14) = dispatch_ioctl as usize;
-    *(drv.add(DRV_UNLOAD) as *mut usize) = unload as usize;
+    *mf.add(0) = dispatch_ok as *const () as usize;
+    *mf.add(2) = dispatch_ok as *const () as usize;
+    *mf.add(14) = dispatch_ioctl as *const () as usize;
+    *(drv.add(DRV_UNLOAD) as *mut usize) = unload as *const () as usize;
 
     STATUS_SUCCESS
 }
 
 unsafe extern "system" fn unload(drv: *mut u8) {
     let mut dos = ustr(DEVICE_DOS);
-    IoDeleteSymbolicLink(&mut dos);
+    let _ = IoDeleteSymbolicLink(&mut dos);
     let dev = *(drv.add(DRV_DEVICE_OBJECT) as *mut PDEVICE_OBJECT);
     if !dev.is_null() {
         IoDeleteDevice(dev);
@@ -303,9 +309,10 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
 }
 
 unsafe fn find_target_process() -> Option<PEPROCESS> {
+    let ps_get_next_process = resolve_ps_get_next_process()?;
     let mut cursor: PEPROCESS = core::ptr::null_mut();
     loop {
-        let next = PsGetNextProcess(cursor);
+        let next = ps_get_next_process(cursor);
         if !cursor.is_null() {
             ObDereferenceObjectDeferDelete(cursor as PVOID);
         }
@@ -316,6 +323,16 @@ unsafe fn find_target_process() -> Option<PEPROCESS> {
             return Some(next);
         }
         cursor = next;
+    }
+}
+
+unsafe fn resolve_ps_get_next_process() -> Option<PsGetNextProcessFn> {
+    let mut name = ustr(PS_GET_NEXT_PROCESS_NAME);
+    let routine = MmGetSystemRoutineAddress(&mut name);
+    if routine.is_null() {
+        None
+    } else {
+        Some(core::mem::transmute::<PVOID, PsGetNextProcessFn>(routine))
     }
 }
 
