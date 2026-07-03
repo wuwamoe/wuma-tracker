@@ -75,7 +75,7 @@ last-updated: 2026-07-03
 
 드라이버는 플레이어 월드 위치를 읽는 데 필요한 좌표 체인을 하드코딩해야 합니다:
 - 게임 모듈 베이스 해석 전략
-- GWorld 앵커 전략
+- 월드 앵커 전략
 - 플레이어 transform 체인
 - world-origin 체인
 - transform 및 origin 오프셋

@@ -75,7 +75,7 @@ The driver must resolve the target process internally. It must not accept a PID 
 
 The driver must hardcode the coordinate chain needed to read player world position:
 - game module base resolution strategy
-- GWorld anchor strategy
+- world-anchor strategy
 - player transform chain
 - world-origin chain
 - transform and origin offsets

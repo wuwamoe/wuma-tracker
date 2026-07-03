@@ -22,7 +22,7 @@ Sections:
 1. Types / constants / extern declarations
 2. Global session state (atomics + unsafe static config)
 3. DriverEntry + IOCTL dispatch boilerplate
-4. Business logic (kread, walk_chain, scan_gworld)
+4. Business logic (kread, walk_chain, scan_world_anchor)
 5. Global allocator + panic handler
 
 ## IOCTL Design

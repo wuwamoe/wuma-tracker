@@ -76,7 +76,7 @@ Primary file: `driver/src/main.rs`.
 3. Replace `SessionConfig` with immutable coordinate configuration.
    - Rename to `PlayerCoordConfig`.
    - Store only compile-time constants or immutable statics.
-   - Include the hardcoded GWorld anchor strategy, GWorld byte pattern, player transform chain, world-origin chain, and offsets.
+   - Include the hardcoded world-anchor strategy, world-anchor byte pattern, player transform chain, world-origin chain, and offsets.
    - Leave placeholder constants only if the real values are intentionally excluded from docs; the code must receive real values before release.
 
 4. Remove session state.
@@ -93,7 +93,7 @@ Primary file: `driver/src/main.rs`.
    - Delete `on_auth`.
    - Delete `on_set_config`.
    - Delete `on_pattern_search`.
-   - Keep pattern scanning only as an internal GWorld anchor helper with hardcoded pattern constants.
+   - Keep pattern scanning only as an internal world-anchor helper with hardcoded pattern constants.
    - Rename and narrow `scan_anchor` to make it clear it cannot scan caller-supplied patterns, ranges, or processes.
    - Update `dispatch_ioctl` so only `IOCTL_GET_LOCATION` is accepted.
 
@@ -161,7 +161,7 @@ Primary file: `driver/src/main.rs`.
    - Ensure the panic handler is divergent after calling `KeBugCheckEx`.
 
 3. Re-check kernel stack usage.
-   - Ensure the internal GWorld pattern scanner keeps large scan buffers in nonpaged pool, not on the kernel stack.
+   - Ensure the internal world-anchor pattern scanner keeps large scan buffers in nonpaged pool, not on the kernel stack.
    - Ensure no user-mode input can choose scan patterns or widen scan ranges.
    - Keep remaining stack buffers small.
 
@@ -223,8 +223,8 @@ Primary file: `src-tauri/src/win_proc_driver.rs`.
    - Remove `build_chain`.
    - Remove `SetConfigReq`.
    - Remove `PatternSearchReq`.
-   - Remove `scan_gworld`.
-   - Remove app-driven `rescan_gworld` behavior that triggers a driver pattern-scan IOCTL.
+   - Remove `scan_world_anchor`.
+   - Remove app-driven `rescan_world_anchor` behavior that triggers a driver pattern-scan IOCTL.
 
 3. Simplify `WinProcDriver`.
    - Store helper connection state instead of a driver device handle and token.

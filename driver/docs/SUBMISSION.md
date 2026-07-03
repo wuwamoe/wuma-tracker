@@ -123,7 +123,7 @@ discoverable with `strings WumaDisplayService.sys`.
 
 ## Maintenance Note
 
-The pointer chain, GWorld anchor pattern/fallback RVA, and target process name
+The pointer chain, world-anchor pattern/RVA, and target process name
 are all specific to a given game client build. A game update that changes the
 executable name, module layout, or pointer chain requires a new build of the
 driver with updated `PlayerCoordConfig` values in `driver/src/main.rs`
