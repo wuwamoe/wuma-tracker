@@ -18,3 +18,4 @@ msix_staging
 
 # 드라이버 빌드 아티팩트
 /driver/target/
+/driver/helper/target
