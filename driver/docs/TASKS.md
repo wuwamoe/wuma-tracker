@@ -66,7 +66,7 @@ Primary file: `driver/src/main.rs`.
 
 1. Replace the module banner.
    - State that the driver only reads WumaTracker player world coordinates.
-   - State that it has no write path, no pattern scan path, no generic memory access path, and no runtime configuration surface.
+   - State that it has no write path, no caller-supplied pattern scan path, no generic memory access path, and no runtime configuration surface.
 
 2. Add binary-visible purpose metadata.
    - Use a Rust-valid representation, for example a `#[used]` static `&str`.
@@ -76,7 +76,7 @@ Primary file: `driver/src/main.rs`.
 3. Replace `SessionConfig` with immutable coordinate configuration.
    - Rename to `PlayerCoordConfig`.
    - Store only compile-time constants or immutable statics.
-   - Include the hardcoded GWorld anchor strategy, player transform chain, world-origin chain, and offsets.
+   - Include the hardcoded GWorld anchor strategy, GWorld byte pattern, player transform chain, world-origin chain, and offsets.
    - Leave placeholder constants only if the real values are intentionally excluded from docs; the code must receive real values before release.
 
 4. Remove session state.
@@ -93,7 +93,8 @@ Primary file: `driver/src/main.rs`.
    - Delete `on_auth`.
    - Delete `on_set_config`.
    - Delete `on_pattern_search`.
-   - Delete `scan_anchor`.
+   - Keep pattern scanning only as an internal GWorld anchor helper with hardcoded pattern constants.
+   - Rename and narrow `scan_anchor` to make it clear it cannot scan caller-supplied patterns, ranges, or processes.
    - Update `dispatch_ioctl` so only `IOCTL_GET_LOCATION` is accepted.
 
 6. Rename and narrow the coordinate reader.
@@ -109,7 +110,8 @@ Primary file: `driver/src/main.rs`.
    - Always dereference the target process before returning.
 
 Verification:
-- `rg -n "IOCTL_AUTH|IOCTL_SET_CONFIG|IOCTL_PATTERN_SEARCH|SESSION_TOKEN|AUTHED_PID|CONFIG_READY|static mut CONFIG|verify_token|on_auth|on_set_config|on_pattern_search|scan_anchor|walk_chain" driver/src/main.rs` returns no matches, except intentional historical comments are not allowed.
+- `rg -n "IOCTL_AUTH|IOCTL_SET_CONFIG|IOCTL_PATTERN_SEARCH|SESSION_TOKEN|AUTHED_PID|CONFIG_READY|static mut CONFIG|verify_token|on_auth|on_set_config|on_pattern_search|walk_chain" driver/src/main.rs` returns no matches, except intentional historical comments are not allowed.
+- `rg -n "prefix_len|suffix_len|PatternSearch|pattern.*buf|caller.*pattern" driver/src/main.rs` returns no live caller-configurable pattern-scan path.
 - `rg -n "PsLookupProcessByProcessId\\(|pid" driver/src/main.rs` shows no user-controlled PID path.
 - `cargo check` in `driver/` succeeds.
 
@@ -159,7 +161,8 @@ Primary file: `driver/src/main.rs`.
    - Ensure the panic handler is divergent after calling `KeBugCheckEx`.
 
 3. Re-check kernel stack usage.
-   - Remove the pattern scanner's large scan buffers as part of Milestone 1.
+   - Ensure the internal GWorld pattern scanner keeps large scan buffers in nonpaged pool, not on the kernel stack.
+   - Ensure no user-mode input can choose scan patterns or widen scan ranges.
    - Keep remaining stack buffers small.
 
 Verification:
@@ -221,7 +224,7 @@ Primary file: `src-tauri/src/win_proc_driver.rs`.
    - Remove `SetConfigReq`.
    - Remove `PatternSearchReq`.
    - Remove `scan_gworld`.
-   - Remove `rescan_gworld` behavior that depends on driver pattern scanning.
+   - Remove app-driven `rescan_gworld` behavior that triggers a driver pattern-scan IOCTL.
 
 3. Simplify `WinProcDriver`.
    - Store helper connection state instead of a driver device handle and token.
@@ -301,7 +304,7 @@ Create or update:
 
 `REVIEW-CHECKLIST.md` must include:
 - no generic memory read/write
-- no pattern scan
+- no caller-supplied or generic pattern scan
 - no runtime config
 - no user-supplied PID
 - no direct Tauri driver open
@@ -318,7 +321,7 @@ Verification:
 The work is complete only when all checks pass:
 
 - Driver exposes exactly one IOCTL: `IOCTL_GET_LOCATION`.
-- Driver has no auth/config/pattern-scan protocol.
+- Driver has no auth/config/caller-supplied pattern-scan protocol.
 - Driver resolves only `Client-Win64-Shipping.exe`.
 - Driver has no mutable global session state.
 - Driver device is restricted to Administrators and SYSTEM.
