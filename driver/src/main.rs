@@ -12,11 +12,11 @@ extern crate alloc;
 
 use wdk_sys::{
     ntddk::{
-        ExAllocatePool2, ExFreePoolWithTag, IoCreateDevice, IoCreateSymbolicLink, IoDeleteDevice,
+        ExAllocatePool2, ExFreePoolWithTag, IoCreateSymbolicLink, IoDeleteDevice,
         IoDeleteSymbolicLink, IofCompleteRequest, ObDereferenceObjectDeferDelete,
     },
     DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, FILE_DEVICE_UNKNOWN, NTSTATUS, PDEVICE_OBJECT,
-    PEPROCESS, PIRP, PUNICODE_STRING, PVOID, SIZE_T, ULONG, ULONG64, UNICODE_STRING,
+    PEPROCESS, PIRP, PUNICODE_STRING, PVOID, SIZE_T, ULONG, ULONG64, ULONG_PTR, UNICODE_STRING,
 };
 
 #[used]
@@ -33,6 +33,9 @@ const POOL_FLAG_NON_PAGED: ULONG64 = 0x40;
 const MM_COPY_MEMORY_VIRTUAL: ULONG = 0x1;
 const POOL_TAG: ULONG = u32::from_le_bytes(*b"WuDr");
 const ALLOC_TAG: u32 = u32::from_le_bytes(*b"WuAl");
+// WumaTracker-specific bugcheck code, used only by our own panic handler; not a
+// documented Microsoft bugcheck, so it never collides with a system-defined one.
+const WUMATRACKER_BUGCHECK_CODE: ULONG = u32::from_le_bytes(*b"WuBC");
 
 const IRP_IO_STATUS: usize = 0x30;
 const IRP_IO_INFORMATION: usize = 0x38;
@@ -99,6 +102,26 @@ extern "system" {
     fn ExFreePool(P: PVOID);
     fn KeStackAttachProcess(Process: PEPROCESS, ApcState: *mut u8);
     fn KeUnstackDetachProcess(ApcState: *mut u8);
+    // Not part of the wdk-sys ntddk.h binding subset; declared directly since it
+    // is exported by ntoskrnl.exe like every other WDM routine used here.
+    fn IoCreateDeviceSecure(
+        DriverObject: *mut u8,
+        DeviceExtensionSize: ULONG,
+        DeviceName: PUNICODE_STRING,
+        DeviceType: ULONG,
+        DeviceCharacteristics: ULONG,
+        Exclusive: u8,
+        DefaultSDDLString: PUNICODE_STRING,
+        DeviceClassGuid: PVOID,
+        DeviceObject: *mut PDEVICE_OBJECT,
+    ) -> NTSTATUS;
+    fn KeBugCheckEx(
+        BugCheckCode: ULONG,
+        BugCheckParameter1: ULONG_PTR,
+        BugCheckParameter2: ULONG_PTR,
+        BugCheckParameter3: ULONG_PTR,
+        BugCheckParameter4: ULONG_PTR,
+    ) -> !;
 }
 
 static DEVICE_NT: &[u16] = &[
@@ -112,6 +135,13 @@ static DEVICE_DOS: &[u16] = &[
 static PS_GET_NEXT_PROCESS_NAME: &[u16] = &[
     0x50, 0x73, 0x47, 0x65, 0x74, 0x4E, 0x65, 0x78, 0x74, 0x50, 0x72, 0x6F, 0x63, 0x65, 0x73, 0x73,
     0,
+];
+// SDDL "D:P(A;;GA;;;BA)(A;;GA;;;SY)": Administrators (BA) and SYSTEM (SY) get
+// generic-all access; everyone else is denied. Protected (P) so it cannot be
+// widened by an inherited ACE.
+static DEVICE_SDDL: &[u16] = &[
+    0x44, 0x3A, 0x50, 0x28, 0x41, 0x3B, 0x3B, 0x47, 0x41, 0x3B, 0x3B, 0x3B, 0x42, 0x41, 0x29, 0x28,
+    0x41, 0x3B, 0x3B, 0x47, 0x41, 0x3B, 0x3B, 0x3B, 0x53, 0x59, 0x29, 0,
 ];
 
 type PsGetNextProcessFn = unsafe extern "system" fn(PEPROCESS) -> PEPROCESS;
@@ -165,15 +195,18 @@ unsafe fn ustr(buf: &[u16]) -> UNICODE_STRING {
 pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> NTSTATUS {
     let mut nt = ustr(DEVICE_NT);
     let mut dos = ustr(DEVICE_DOS);
+    let mut sddl = ustr(DEVICE_SDDL);
     let mut dev: PDEVICE_OBJECT = core::ptr::null_mut();
 
-    let s = IoCreateDevice(
-        drv as *mut _,
+    let s = IoCreateDeviceSecure(
+        drv,
         0,
         &mut nt,
         FILE_DEVICE_UNKNOWN,
         0,
         0,
+        &mut sddl,
+        core::ptr::null_mut(),
         &mut dev,
     );
     if s != STATUS_SUCCESS {
@@ -608,6 +641,14 @@ static A: KAlloc = KAlloc;
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    unsafe {
+        KeBugCheckEx(
+            WUMATRACKER_BUGCHECK_CODE,
+            info as *const _ as ULONG_PTR,
+            0,
+            0,
+            0,
+        )
+    }
 }
