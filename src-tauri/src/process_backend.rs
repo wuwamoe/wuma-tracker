@@ -18,6 +18,13 @@ pub trait ProcessBackend {
         offset.name.clone()
     }
 
+    /// 단일 호출로 PlayerInfo 전체를 반환한다 (fast path).
+    /// 기본 구현은 None을 반환해 기존 포인터 체인 경로를 사용하게 한다.
+    /// WinProcDriver처럼 드라이버 기반 백엔드는 이를 오버라이드해 IOCTL 1회로 처리한다.
+    fn get_player_info(&self, _offset: &WuwaOffset) -> Option<Result<PlayerInfo, NativeError>> {
+        None
+    }
+
     fn read_memory<T: Copy>(&self, address: u64) -> Result<T, NativeError> {
         if address == 0 {
             return Err(PointerChainError { message: "addr=0".to_string() });
@@ -55,6 +62,31 @@ pub fn select_player_info<B: ProcessBackend>(
 
     let mut first_err: Option<NativeError> = None;
     for (i, offset) in offsets.iter().enumerate() {
+        // fast path: 드라이버 백엔드는 IOCTL 1회로 전체 처리
+        if let Some(result) = backend.get_player_info(offset) {
+            match result {
+                Ok(info) => {
+                    log::info!(
+                        "Offset variant #{} ({}) fast-path succeeded.",
+                        i + 1,
+                        backend.active_offset_name(offset)
+                    );
+                    *cached_offset = Some(offset.clone());
+                    return Ok(info);
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Offset variant #{} ({}) fast-path failed: {}",
+                        i + 1,
+                        backend.active_offset_name(offset),
+                        e
+                    );
+                    if first_err.is_none() { first_err = Some(e); }
+                    continue;
+                }
+            }
+        }
+        // slow path: 기존 포인터 체인 (WinProc, MacProc)
         match read_player_info(backend, offset) {
             Ok(location) => {
                 log::info!(

@@ -13,6 +13,8 @@ mod types;
 mod util;
 #[cfg(windows)]
 mod win_proc;
+#[cfg(windows)]
+mod win_proc_driver;
 
 use std::sync::Arc;
 

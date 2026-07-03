@@ -6,6 +6,8 @@ use crate::types::NativeError::PointerChainError;
 use crate::types::{CollectorMessage, NativeError};
 #[cfg(windows)]
 use crate::win_proc::WinProc as PlatformProc;
+// ↑ 커널 드라이버로 교체 시 위 줄을 아래로 변경:
+// use crate::win_proc_driver::WinProcDriver as PlatformProc;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("Native process tracking is supported only on Windows and macOS.");
