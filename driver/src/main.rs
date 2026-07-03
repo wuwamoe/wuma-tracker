@@ -70,8 +70,8 @@ use ioctls::IOCTL_GET_LOCATION;
 
 const USER_MIN: u64 = 0x1_0000;
 const USER_MAX: u64 = 0x7FFF_FFFF_FFFF;
-const GWORLD_PATTERN_PREFIX: &[u8] = &[0x48, 0x8B, 0x1D];
-const GWORLD_PATTERN_SUFFIX: &[u8] = &[0x48, 0x85, 0xDB, 0x74, 0xFF, 0x41, 0xB0, 0x01];
+const WORLD_ANCHOR_PATTERN_PREFIX: &[u8] = &[0x48, 0x8B, 0x1D];
+const WORLD_ANCHOR_PATTERN_SUFFIX: &[u8] = &[0x48, 0x85, 0xDB, 0x74, 0xFF, 0x41, 0xB0, 0x01];
 
 /// Converts an ASCII `&str` to a fixed-size UTF-16 array at compile time, so
 /// `TARGET_PROCESS_NAME_UTF16` below is generated from `ioctls::TARGET_PROCESS_NAME`
@@ -122,6 +122,17 @@ extern "system" {
     // Peb->ImageBaseAddress vs Wow64Process->Peb32->ImageBaseAddress split
     // that WOW64 processes have.
     fn PsGetProcessSectionBaseAddress(Process: PEPROCESS) -> *mut u8;
+    // Long-stable ntoskrnl.exe export returning a pointer to a fixed 16-byte
+    // (15 chars + NUL) buffer inside EPROCESS holding the truncated image
+    // base name. Used only to cheaply confirm a cached PID still refers to
+    // the expected process (PID reuse after the original process exits is
+    // the failure mode this guards against) without redoing the full
+    // ZwQuerySystemInformation process-list scan.
+    fn PsGetProcessImageFileName(Process: PEPROCESS) -> *mut u8;
+    // Long-stable ntoskrnl.exe export; the mirror of PsLookupProcessByProcessId,
+    // used to read back the PID of a process found via the full scan so it
+    // can be cached.
+    fn PsGetProcessId(Process: PEPROCESS) -> HANDLE;
     // Not part of the wdk-sys ntddk.h binding subset, but a long-documented
     // (if lightly-documented) NT export used here instead of the undocumented
     // PsGetNextProcess, which this Windows build's ntoskrnl.exe does not
@@ -362,7 +373,7 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
         _pad: [0; 3],
     };
 
-    let proc = match find_target_process() {
+    let proc = match find_target_process_cached() {
         Ok(proc) => proc,
         Err(dbg) => {
             // Bit-exact (not lossy-cast) so the real i32/u32 values survive
@@ -442,6 +453,79 @@ struct FindProcessDebug {
     /// if it's still 0xCAFEBABE, the call never actually wrote to the
     /// buffer at all.
     first_dword_after_call: u32,
+}
+
+// Across-call caches so a live overlay polling this IOCTL doesn't redo a
+// full ZwQuerySystemInformation process-list scan and a world-anchor byte-pattern
+// scan (up to 512KB read from the target) on every single request. Both are
+// self-healing: a cache hit is verified cheaply before use, and any failure
+// (process exited/PID reused, module reloaded/relocated) falls back to a
+// full rescan on that same call and refreshes the cache.
+static CACHED_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CACHED_WORLD_ANCHOR_RVA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// First 14 bytes of "Client-Win64-Shipping.exe" — EPROCESS::ImageFileName is
+// a fixed UCHAR[15] (truncated basename, not guaranteed NUL-terminated for
+// names this long), so 14 bytes is the most we can safely compare.
+const CACHED_NAME_PREFIX: &[u8; 14] = b"Client-Win64-S";
+
+/// Cheaply re-validates a cached PID instead of redoing the full process
+/// scan: looks the PID up directly and confirms it still refers to the
+/// expected image, guarding against the PID having been reused by an
+/// unrelated process after the original one exited.
+unsafe fn try_cached_process() -> Option<PEPROCESS> {
+    let pid = CACHED_PID.load(core::sync::atomic::Ordering::Relaxed);
+    if pid == 0 {
+        return None;
+    }
+    let mut proc: PEPROCESS = core::ptr::null_mut();
+    if PsLookupProcessByProcessId(pid as HANDLE, &mut proc) != STATUS_SUCCESS || proc.is_null() {
+        CACHED_PID.store(0, core::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+    let name_ptr = PsGetProcessImageFileName(proc);
+    let matches = !name_ptr.is_null()
+        && core::slice::from_raw_parts(name_ptr, CACHED_NAME_PREFIX.len()) == CACHED_NAME_PREFIX;
+    if !matches {
+        ObDereferenceObjectDeferDelete(proc as PVOID);
+        CACHED_PID.store(0, core::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+    Some(proc)
+}
+
+/// Cache-aware wrapper around `find_target_process`: tries the cached PID
+/// first, only falling back to the full process-list scan on a cache miss
+/// or a stale/invalid cached PID, and refreshes the cache on a fresh scan.
+unsafe fn find_target_process_cached() -> Result<PEPROCESS, FindProcessDebug> {
+    if let Some(proc) = try_cached_process() {
+        return Ok(proc);
+    }
+    let result = find_target_process();
+    if let Ok(proc) = result {
+        CACHED_PID.store(
+            PsGetProcessId(proc) as u64,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    result
+}
+
+/// Cache-aware world-anchor resolution: tries the cached RVA first (just a
+/// pointer read, not a rescan) and only falls back to the full byte-pattern
+/// scan if that fails (module reloaded/relocated), refreshing the cache on
+/// a fresh scan.
+unsafe fn resolve_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
+    let cached = CACHED_WORLD_ANCHOR_RVA.load(core::sync::atomic::Ordering::Relaxed);
+    if cached != 0 {
+        if let Some(anchor) = kread_ptr(proc, base + cached) {
+            return Some(anchor);
+        }
+    }
+    let rva = find_hardcoded_world_anchor(proc, base)?;
+    let anchor = kread_ptr(proc, base + rva)?;
+    CACHED_WORLD_ANCHOR_RVA.store(rva, core::sync::atomic::Ordering::Relaxed);
+    Some(anchor)
 }
 
 unsafe fn find_target_process() -> Result<PEPROCESS, FindProcessDebug> {
@@ -594,8 +678,7 @@ unsafe fn read_player_world_position(
     proc: PEPROCESS,
 ) -> Result<(f32, f32, f32, f32, f32, f32), u8> {
     let base = read_main_module_base(proc).ok_or(1u8)?;
-    let anchor_rva = find_hardcoded_gworld_anchor(proc, base).ok_or(1u8)?;
-    let anchor = kread_ptr(proc, base + anchor_rva).ok_or(1u8)?;
+    let anchor = resolve_world_anchor(proc, base).ok_or(1u8)?;
 
     let mut ptr = anchor;
     for i in 0..PLAYER_COORD_CONFIG.chain.len() {
@@ -665,7 +748,7 @@ fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {
     (roll * 180.0 / PI, pitch * 180.0 / PI, yaw * 180.0 / PI)
 }
 
-unsafe fn find_hardcoded_gworld_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
+unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
     const BATCH_GAP: u64 = 4096;
     const HEADER_READ: usize = 4096;
     const MAX_BATCH: usize = 512 * 1024;
@@ -750,8 +833,8 @@ unsafe fn find_hardcoded_gworld_anchor(proc: PEPROCESS, base: u64) -> Option<u64
         return None;
     }
 
-    let instruction_len = GWORLD_PATTERN_PREFIX.len() + 4;
-    let pattern_len = instruction_len + GWORLD_PATTERN_SUFFIX.len();
+    let instruction_len = WORLD_ANCHOR_PATTERN_PREFIX.len() + 4;
+    let pattern_len = instruction_len + WORLD_ANCHOR_PATTERN_SUFFIX.len();
     let mut result = None;
     let mut i = 0;
 
@@ -773,22 +856,22 @@ unsafe fn find_hardcoded_gworld_anchor(proc: PEPROCESS, base: u64) -> Option<u64
         if read_size >= pattern_len && kread(proc, base + batch_start, sb, read_size) {
             let scan = core::slice::from_raw_parts(sb, read_size);
             'scan: for off in 0..read_size - pattern_len + 1 {
-                if scan[off..off + GWORLD_PATTERN_PREFIX.len()] != *GWORLD_PATTERN_PREFIX {
+                if scan[off..off + WORLD_ANCHOR_PATTERN_PREFIX.len()] != *WORLD_ANCHOR_PATTERN_PREFIX {
                     continue;
                 }
-                for (k, &v) in GWORLD_PATTERN_SUFFIX.iter().enumerate() {
+                for (k, &v) in WORLD_ANCHOR_PATTERN_SUFFIX.iter().enumerate() {
                     if v != 0xFF && scan[off + instruction_len + k] != v {
                         continue 'scan;
                     }
                 }
 
-                let Some(disp) = read_i32(scan, off + GWORLD_PATTERN_PREFIX.len()) else {
+                let Some(disp) = read_i32(scan, off + WORLD_ANCHOR_PATTERN_PREFIX.len()) else {
                     continue;
                 };
                 let instr_rva = batch_start + off as u64;
-                let gworld_rva = ((instr_rva as i64) + instruction_len as i64 + disp as i64) as u64;
-                if gworld_rva > 0 && gworld_rva < soi as u64 {
-                    result = Some(gworld_rva);
+                let world_anchor_rva = ((instr_rva as i64) + instruction_len as i64 + disp as i64) as u64;
+                if world_anchor_rva > 0 && world_anchor_rva < soi as u64 {
+                    result = Some(world_anchor_rva);
                     break 'out;
                 }
             }

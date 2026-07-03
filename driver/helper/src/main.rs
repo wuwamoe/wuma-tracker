@@ -236,7 +236,7 @@ fn get_location(driver: Option<HANDLE>) -> GetLocationResponse {
     };
 
     let mut returned: DWORD = 0;
-    let ok = unsafe {
+    unsafe {
         DeviceIoControl(
             driver,
             IOCTL_GET_LOCATION,
@@ -246,25 +246,13 @@ fn get_location(driver: Option<HANDLE>) -> GetLocationResponse {
             mem::size_of::<GetLocationResponse>() as DWORD,
             &mut returned,
             null_mut(),
-        )
-    };
-    if ok == 0 {
-        let err = unsafe { GetLastError() };
-        eprintln!(
-            "wuma-tracker-helper: DeviceIoControl(IOCTL_GET_LOCATION) failed (returned={}, error={})",
-            returned, err
-        );
-    } else {
-        eprintln!(
-            "wuma-tracker-helper: DeviceIoControl(IOCTL_GET_LOCATION) ok (returned={})",
-            returned
         );
     }
-    // Buffered I/O copies the driver's output buffer back based on the bytes
-    // it reported as written, regardless of the completion NTSTATUS. The
-    // driver only writes zero bytes back when it could not find the target
-    // process (STATUS_NOT_FOUND, returned before touching the buffer); every
-    // other path — success or chain failure — writes the full response.
+    // The driver always returns STATUS_SUCCESS with the full response
+    // (success, target-missing, or chain-failure stage all included), so
+    // buffered I/O only fails to copy anything back on a real IOCTL-level
+    // error (bad params, IRP dispatch failure, etc.) — that's the only case
+    // `returned` should ever be 0 now.
     if returned == 0 {
         resp.stage = STAGE_TARGET_MISSING;
     }
