@@ -41,7 +41,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $DriverDir = Split-Path -Parent $PSScriptRoot
+$HelperDir = Join-Path $DriverDir "helper"
 $OutSys = Join-Path $DriverDir "target\WumaDisplayService.sys"
+$OutHelperExe = Join-Path $DriverDir "target\wuma_tracker_helper.exe"
 
 function Fail($msg) {
     Write-Error $msg
@@ -57,12 +59,37 @@ if (-not (Test-Path $setupBuildEnv)) {
     Fail "EWDK를 찾을 수 없습니다: $setupBuildEnv (-EwdkRoot 확인)"
 }
 
+# ── 0. 헬퍼 빌드 (일반 win32 바이너리, EWDK의 winsdk=none 환경이 아니라 시스템에
+#      설치된 일반 MSVC/Windows SDK로 빌드해야 하므로 EWDK 환경 로드 전에 먼저 한다) ──
+
+Write-Host "[0/6] 헬퍼 빌드 중 (cargo build --release, $HelperDir)..." -ForegroundColor Cyan
+
+Push-Location $HelperDir
+try {
+    & cargo build --release
+    if ($LASTEXITCODE -ne 0) {
+        Fail "헬퍼 cargo build 실패 (exit $LASTEXITCODE)"
+    }
+} finally {
+    Pop-Location
+}
+
+$builtHelperExe = Join-Path $HelperDir "target\release\wuma_tracker_helper.exe"
+if (-not (Test-Path $builtHelperExe)) {
+    Fail "헬퍼 빌드 산출물을 찾지 못했습니다: $builtHelperExe"
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $OutHelperExe) | Out-Null
+Copy-Item $builtHelperExe $OutHelperExe -Force
+
 # ── 1. EWDK 빌드 환경 로드 (cmd에서 실행 후 env를 PowerShell로 가져옴) ──────────
 
-Write-Host "[1/5] EWDK 빌드 환경 로드 중 ($EwdkRoot, $Arch)..." -ForegroundColor Cyan
+Write-Host "[1/6] EWDK 빌드 환경 로드 중 ($EwdkRoot, $Arch)..." -ForegroundColor Cyan
 
 $envDumpFile = New-TemporaryFile
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 cmd /c "`"$setupBuildEnv`" $Arch && set" > $envDumpFile.FullName 2>&1
+$ErrorActionPreference = $prevEap
 
 $envVars = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 Get-Content $envDumpFile.FullName | ForEach-Object {
@@ -91,7 +118,7 @@ $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 # ── 2. LIB 경로 보강 ─────────────────────────────────────────────────────────
 # vsdevcmd -winsdk=none 때문에 빠진 um/ucrt/MSVC lib 경로를 EWDK 트리에서 직접 찾아 채운다.
 
-Write-Host "[2/5] 링커 LIB 경로 보강 중..." -ForegroundColor Cyan
+Write-Host "[2/6] 링커 LIB 경로 보강 중..." -ForegroundColor Cyan
 
 $sdkVersion = $envVars["Version_Number"]
 $sdkRoot = $envVars["WDKContentRoot"].TrimEnd('\')
@@ -112,7 +139,7 @@ $env:LIB = "$($env:LIB);$extraLib"
 
 # ── 3. 빌드 ──────────────────────────────────────────────────────────────────
 
-Write-Host "[3/5] cargo build --release ($DriverDir)..." -ForegroundColor Cyan
+Write-Host "[3/6] cargo build --release ($DriverDir)..." -ForegroundColor Cyan
 
 Push-Location $DriverDir
 try {
@@ -131,19 +158,19 @@ if (-not (Test-Path $builtExe)) {
 
 # ── 4. .sys로 배치 ───────────────────────────────────────────────────────────
 
-Write-Host "[4/5] .sys로 복사: $OutSys" -ForegroundColor Cyan
+Write-Host "[4/6] .sys로 복사: $OutSys" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path (Split-Path $OutSys) | Out-Null
 Copy-Item $builtExe $OutSys -Force
 
 # ── 5. 서명 ──────────────────────────────────────────────────────────────────
 
 if ($SkipSign) {
-    Write-Host "[5/5] -SkipSign 지정됨, 서명 생략." -ForegroundColor Yellow
-    Write-Host "빌드 완료: $OutSys" -ForegroundColor Green
+    Write-Host "[5/6] -SkipSign 지정됨, 서명 생략." -ForegroundColor Yellow
+    Write-Host "빌드 완료: $OutSys, $OutHelperExe" -ForegroundColor Green
     exit 0
 }
 
-Write-Host "[5/5] signtool로 서명 중 (thumbprint=$CertThumbprint)..." -ForegroundColor Cyan
+Write-Host "[5/6] signtool로 드라이버+헬퍼 서명 중 (thumbprint=$CertThumbprint)..." -ForegroundColor Cyan
 
 $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -match "\\x64\\" } |
@@ -154,14 +181,16 @@ if (-not $signtool) {
     Fail "signtool.exe를 찾지 못했습니다."
 }
 
-& $signtool sign /sha1 $CertThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 /v $OutSys
-if ($LASTEXITCODE -ne 0) {
-    Fail "signtool sign 실패 (exit $LASTEXITCODE)"
+foreach ($target in @($OutSys, $OutHelperExe)) {
+    & $signtool sign /sha1 $CertThumbprint /fd SHA256 /tr $TimestampUrl /td SHA256 /v $target
+    if ($LASTEXITCODE -ne 0) {
+        Fail "signtool sign 실패 ($target, exit $LASTEXITCODE)"
+    }
+
+    & $signtool verify /pa /v $target
+    if ($LASTEXITCODE -ne 0) {
+        Fail "signtool verify 실패 ($target, exit $LASTEXITCODE)"
+    }
 }
 
-& $signtool verify /pa /v $OutSys
-if ($LASTEXITCODE -ne 0) {
-    Fail "signtool verify 실패 (exit $LASTEXITCODE)"
-}
-
-Write-Host "빌드 + 서명 완료: $OutSys" -ForegroundColor Green
+Write-Host "빌드 + 서명 완료: $OutSys, $OutHelperExe" -ForegroundColor Green

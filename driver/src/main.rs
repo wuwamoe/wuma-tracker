@@ -10,6 +10,9 @@
 
 extern crate alloc;
 
+#[path = "../shared/ioctls.rs"]
+mod ioctls;
+
 use wdk_sys::{
     ntddk::{
         ExAllocatePool2, ExFreePoolWithTag, IoCreateSymbolicLink, IoDeleteDevice,
@@ -49,20 +52,28 @@ const DRV_DEVICE_OBJECT: usize = 0x08;
 const DRV_UNLOAD: usize = 0x68;
 const DRV_MAJOR_FUNCTION: usize = 0x70;
 
-const fn ctl(func: u32) -> u32 {
-    (0x22 << 16) | (func << 2)
-}
-const IOCTL_GET_LOCATION: u32 = ctl(0x802);
+use ioctls::IOCTL_GET_LOCATION;
 
 const USER_MIN: u64 = 0x1_0000;
 const USER_MAX: u64 = 0x7FFF_FFFF_FFFF;
 const PEB_IMAGE_BASE_ADDRESS: u64 = 0x10;
 const GWORLD_PATTERN_PREFIX: &[u8] = &[0x48, 0x8B, 0x1D];
 const GWORLD_PATTERN_SUFFIX: &[u8] = &[0x48, 0x85, 0xDB, 0x74, 0xFF, 0x41, 0xB0, 0x01];
-const TARGET_PROCESS_NAME_UTF16: [u16; 25] = [
-    0x43, 0x6C, 0x69, 0x65, 0x6E, 0x74, 0x2D, 0x57, 0x69, 0x6E, 0x36, 0x34, 0x2D, 0x53, 0x68, 0x69,
-    0x70, 0x70, 0x69, 0x6E, 0x67, 0x2E, 0x65, 0x78, 0x65,
-];
+
+/// Converts an ASCII `&str` to a fixed-size UTF-16 array at compile time, so
+/// `TARGET_PROCESS_NAME_UTF16` below is generated from `ioctls::TARGET_PROCESS_NAME`
+/// instead of being a second, independently-maintained copy of the process name.
+const fn ascii_to_utf16<const N: usize>(s: &str) -> [u16; N] {
+    let bytes = s.as_bytes();
+    let mut out = [0u16; N];
+    let mut i = 0;
+    while i < bytes.len() {
+        out[i] = bytes[i] as u16;
+        i += 1;
+    }
+    out
+}
+const TARGET_PROCESS_NAME_UTF16: [u16; 25] = ascii_to_utf16(ioctls::TARGET_PROCESS_NAME);
 
 struct PlayerCoordConfig {
     fallback_gworld_rva: u64,
@@ -128,10 +139,7 @@ static DEVICE_NT: &[u16] = &[
     0x5C, 0x44, 0x65, 0x76, 0x69, 0x63, 0x65, 0x5C, 0x57, 0x75, 0x6D, 0x61, 0x44, 0x69, 0x73, 0x70,
     0x6C, 0x61, 0x79, 0x53, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0,
 ];
-static DEVICE_DOS: &[u16] = &[
-    0x5C, 0x5C, 0x2E, 0x5C, 0x57, 0x75, 0x6D, 0x61, 0x44, 0x69, 0x73, 0x70, 0x6C, 0x61, 0x79, 0x53,
-    0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0,
-];
+static DEVICE_DOS: [u16; 23] = ascii_to_utf16(ioctls::DEVICE_NAME);
 static PS_GET_NEXT_PROCESS_NAME: &[u16] = &[
     0x50, 0x73, 0x47, 0x65, 0x74, 0x4E, 0x65, 0x78, 0x74, 0x50, 0x72, 0x6F, 0x63, 0x65, 0x73, 0x73,
     0,
@@ -146,17 +154,7 @@ static DEVICE_SDDL: &[u16] = &[
 
 type PsGetNextProcessFn = unsafe extern "system" fn(PEPROCESS) -> PEPROCESS;
 
-#[repr(C)]
-struct LocationResponse {
-    x: f32,
-    y: f32,
-    z: f32,
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
-    stage: u8,
-    _pad: [u8; 3],
-}
+use ioctls::GetLocationResponse;
 
 #[repr(C)]
 struct FTransform {
@@ -194,7 +192,7 @@ unsafe fn ustr(buf: &[u16]) -> UNICODE_STRING {
 #[export_name = "DriverEntry"]
 pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> NTSTATUS {
     let mut nt = ustr(DEVICE_NT);
-    let mut dos = ustr(DEVICE_DOS);
+    let mut dos = ustr(&DEVICE_DOS);
     let mut sddl = ustr(DEVICE_SDDL);
     let mut dev: PDEVICE_OBJECT = core::ptr::null_mut();
 
@@ -231,7 +229,7 @@ pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> 
 }
 
 unsafe extern "system" fn unload(drv: *mut u8) {
-    let mut dos = ustr(DEVICE_DOS);
+    let mut dos = ustr(&DEVICE_DOS);
     let _ = IoDeleteSymbolicLink(&mut dos);
     let dev = *(drv.add(DRV_DEVICE_OBJECT) as *mut PDEVICE_OBJECT);
     if !dev.is_null() {
@@ -297,7 +295,7 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
     if ilen != 0 {
         return (STATUS_INVALID_PARAMETER, 0);
     }
-    if olen < core::mem::size_of::<LocationResponse>() || buf.is_null() {
+    if olen < core::mem::size_of::<GetLocationResponse>() || buf.is_null() {
         return (STATUS_BUFFER_TOO_SMALL, 0);
     }
 
@@ -309,8 +307,8 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
     let result = read_player_world_position(proc);
     ObDereferenceObjectDeferDelete(proc as PVOID);
 
-    let r = &mut *(buf as *mut LocationResponse);
-    *r = LocationResponse {
+    let r = &mut *(buf as *mut GetLocationResponse);
+    *r = GetLocationResponse {
         x: 0.0,
         y: 0.0,
         z: 0.0,
@@ -329,13 +327,13 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
             r.pitch = p;
             r.yaw = yw;
             r.roll = rl;
-            (STATUS_SUCCESS, core::mem::size_of::<LocationResponse>())
+            (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>())
         }
         Err(stage) => {
             r.stage = stage;
             (
                 STATUS_UNSUCCESSFUL,
-                core::mem::size_of::<LocationResponse>(),
+                core::mem::size_of::<GetLocationResponse>(),
             )
         }
     }
