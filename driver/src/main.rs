@@ -28,24 +28,6 @@ use wdk_sys::{
 #[link_section = ".rdata"]
 static WUMATRACKER_PURPOSE: &str = "WumaTracker Player Position Service; reads only player world coordinates for the legitimate WumaTracker overlay service; no write, no generic pattern scan, no generic memory access, no runtime configuration.";
 
-extern "system" {
-    // Variadic kernel-mode logging function (ntoskrnl.exe export); not bound
-    // by wdk_sys because bindgen can't represent C varargs. Only ever called
-    // here with a single "%s" + pre-formatted, NUL-terminated string, so the
-    // System calling convention/varargs ABI mismatch risk is a non-issue.
-    fn DbgPrint(Format: *const u8, ...) -> i32;
-}
-
-/// Debug-only pointer-chain tracing for `read_player_world_position`, visible
-/// via DebugView/WinDbg (`Sysinternals DebugView` with "Capture Kernel"
-/// enabled, or `!dbgprint`). Remove once the chain offsets are confirmed
-/// working against a live game process.
-unsafe fn klog(msg: alloc::string::String) {
-    let mut buf = msg.into_bytes();
-    buf.push(0);
-    DbgPrint(b"[wuma-tracker] %s\0".as_ptr(), buf.as_ptr());
-}
-
 const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
@@ -345,14 +327,7 @@ unsafe fn kread(proc: PEPROCESS, addr: u64, out: *mut u8, len: usize) -> bool {
         &mut copied,
     );
     KeUnstackDetachProcess(apc.0.as_mut_ptr());
-    let ok = s == STATUS_SUCCESS && copied == len as SIZE_T;
-    if !ok {
-        klog(alloc::format!(
-            "kread(addr=0x{:016X}, len={}) MmCopyMemory status=0x{:08X} copied={}",
-            addr, len, s as u32, copied
-        ));
-    }
-    ok
+    s == STATUS_SUCCESS && copied == len as SIZE_T
 }
 
 unsafe fn kread_ptr(proc: PEPROCESS, addr: u64) -> Option<u64> {
@@ -541,17 +516,7 @@ unsafe fn find_target_process() -> Result<PEPROCESS, FindProcessDebug> {
         if !image_name.Buffer.is_null() {
             seen = seen.wrapping_add(1);
             if unicode_path_ends_with_target(image_name) {
-                let pid = *(entry.add(SPI_UNIQUE_PROCESS_ID) as *const HANDLE);
-                let name_len = (image_name.Length / 2) as usize;
-                let name: alloc::string::String = core::slice::from_raw_parts(image_name.Buffer, name_len)
-                    .iter()
-                    .map(|&c| if c < 128 { c as u8 as char } else { '?' })
-                    .collect();
-                klog(alloc::format!(
-                    "find_target_process: matched pid={:?} image_name=\"{}\"",
-                    pid, name
-                ));
-                matched_pid = Some(pid);
+                matched_pid = Some(*(entry.add(SPI_UNIQUE_PROCESS_ID) as *const HANDLE));
                 break;
             }
         }
@@ -628,107 +593,39 @@ const fn to_ascii_lower_u16(ch: u16) -> u16 {
 unsafe fn read_player_world_position(
     proc: PEPROCESS,
 ) -> Result<(f32, f32, f32, f32, f32, f32), u8> {
-    use alloc::format;
-
-    let Some(base) = read_main_module_base(proc) else {
-        klog("stage=1 FAILED: read_main_module_base returned None".into());
-        return Err(1u8);
-    };
-    klog(format!("base=0x{:016X}", base));
-
-    let Some(anchor_rva) = find_hardcoded_gworld_anchor(proc, base) else {
-        klog("stage=1 FAILED: find_hardcoded_gworld_anchor pattern scan found nothing (no fallback)".into());
-        return Err(1u8);
-    };
-    klog(format!("anchor_rva=0x{:X} (scanned)", anchor_rva));
-
-    let Some(anchor) = kread_ptr(proc, base + anchor_rva) else {
-        klog(format!(
-            "stage=1 FAILED: kread_ptr(base+anchor_rva=0x{:016X}) returned None (gworld ptr unreadable/invalid)",
-            base + anchor_rva
-        ));
-        return Err(1u8);
-    };
-    klog(format!("gworld=0x{:016X}", anchor));
+    let base = read_main_module_base(proc).ok_or(1u8)?;
+    let anchor_rva = find_hardcoded_gworld_anchor(proc, base).ok_or(1u8)?;
+    let anchor = kread_ptr(proc, base + anchor_rva).ok_or(1u8)?;
 
     let mut ptr = anchor;
     for i in 0..PLAYER_COORD_CONFIG.chain.len() {
-        let addr = ptr + PLAYER_COORD_CONFIG.chain[i];
-        let Some(next) = kread_ptr(proc, addr) else {
-            klog(format!(
-                "stage={} FAILED: chain[{}] kread_ptr(prev=0x{:016X} + off=0x{:X} = 0x{:016X}) returned None",
-                i + 2,
-                i,
-                ptr,
-                PLAYER_COORD_CONFIG.chain[i],
-                addr
-            ));
-            return Err((i + 2) as u8);
-        };
-        klog(format!(
-            "chain[{}] 0x{:016X} + 0x{:X} -> 0x{:016X}",
-            i, ptr, PLAYER_COORD_CONFIG.chain[i], next
-        ));
-        ptr = next;
+        ptr = kread_ptr(proc, ptr + PLAYER_COORD_CONFIG.chain[i]).ok_or((i + 2) as u8)?;
     }
 
     let mut rel = core::mem::MaybeUninit::<FRelativeTransform>::uninit();
-    let rel_addr = ptr + PLAYER_COORD_CONFIG.relative_location_offset;
     if !kread(
         proc,
-        rel_addr,
+        ptr + PLAYER_COORD_CONFIG.relative_location_offset,
         rel.as_mut_ptr() as *mut u8,
         core::mem::size_of::<FRelativeTransform>(),
     ) {
-        klog(format!(
-            "stage={} FAILED: kread(relative_location @ 0x{:016X}, {} bytes) failed",
-            PLAYER_COORD_CONFIG.chain.len() + 2,
-            rel_addr,
-            core::mem::size_of::<FRelativeTransform>()
-        ));
         return Err((PLAYER_COORD_CONFIG.chain.len() + 2) as u8);
     }
     let rel = rel.assume_init();
-    klog(format!(
-        "relative_location=({}, {}, {}) rotation=({}, {}, {})",
-        rel.location.x,
-        rel.location.y,
-        rel.location.z,
-        rel.rotation.pitch,
-        rel.rotation.yaw,
-        rel.rotation.roll
-    ));
 
     let iv = if PLAYER_COORD_CONFIG.add_world_origin {
-        let persistent_level_addr = anchor + 0x30;
-        let Some(persistent_level) = kread_ptr(proc, persistent_level_addr) else {
-            klog(format!(
-                "stage={} FAILED: kread_ptr(persistent_level @ gworld+0x30 = 0x{:016X}) returned None",
-                PLAYER_COORD_CONFIG.chain.len() + 3,
-                persistent_level_addr
-            ));
-            return Err((PLAYER_COORD_CONFIG.chain.len() + 3) as u8);
-        };
-        klog(format!("persistent_level=0x{:016X}", persistent_level));
-
+        let persistent_level =
+            kread_ptr(proc, anchor + 0x30).ok_or((PLAYER_COORD_CONFIG.chain.len() + 3) as u8)?;
         let mut iv = core::mem::MaybeUninit::<FIntVector>::uninit();
-        let origin_addr = persistent_level + 0xC8;
         if !kread(
             proc,
-            origin_addr,
+            persistent_level + 0xC8,
             iv.as_mut_ptr() as *mut u8,
             core::mem::size_of::<FIntVector>(),
         ) {
-            klog(format!(
-                "stage={} FAILED: kread(world_origin @ persistent_level+0xC8 = 0x{:016X}) failed",
-                PLAYER_COORD_CONFIG.chain.len() + 4,
-                origin_addr
-            ));
             return Err((PLAYER_COORD_CONFIG.chain.len() + 4) as u8);
         }
-        let iv = iv.assume_init();
-        klog(format!("world_origin=({}, {}, {})", iv.x, iv.y, iv.z));
-        iv
+        iv.assume_init()
     } else {
         FIntVector { x: 0, y: 0, z: 0 }
     };
@@ -744,18 +641,12 @@ unsafe fn read_player_world_position(
 }
 
 unsafe fn read_main_module_base(proc: PEPROCESS) -> Option<u64> {
-    use alloc::format;
-
     // Reads EPROCESS::SectionBaseAddress directly instead of walking
     // Peb->ImageBaseAddress: no attach, no MmCopyMemory into the target's
     // user address space, so it can't fail with STATUS_PARTIAL_COPY the way
     // that path did.
     let raw = PsGetProcessSectionBaseAddress(proc) as u64;
     if !is_valid_ptr(raw) {
-        klog(format!(
-            "read_main_module_base: PsGetProcessSectionBaseAddress(proc=0x{:016X}) returned invalid value 0x{:016X}",
-            proc as u64, raw
-        ));
         return None;
     }
     Some(raw)
