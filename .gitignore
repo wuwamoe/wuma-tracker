@@ -19,3 +19,6 @@ msix_staging
 # 드라이버 빌드 아티팩트
 /driver/target/
 /driver/helper/target
+
+# MSI 빌드 아티팩트 (build-msi.ps1 / sign-msi.ps1)
+/dist/

@@ -24,6 +24,19 @@ use wdk_sys::{
     UNICODE_STRING,
 };
 
+// `IRP`/`DEVICE_OBJECT`/`DRIVER_OBJECT` are opaque in wdk_sys's bindgen output
+// (declared as a bare `{ _address: u8 }` placeholder with no field accessors),
+// so the dispatch routines below poke fixed byte offsets into them instead.
+// Those offsets were hand-verified against A:\EWDK's km\wdm.h (WDK
+// 10.0.28000.0, x64) and are correct for that header. There is no
+// compile-time way to re-verify this against wdk_sys: bindgen only records
+// the true C-side size/align inside a `#[test]` fn (e.g. `IRP` = 208
+// bytes/align 16), and that test cannot run for this no_std kernel target, so
+// `size_of::<wdk_sys::IRP>()` reports the 1-byte placeholder, not the real
+// size — it cannot be used as a build-time tripwire. If the target WDK
+// version ever changes, every hardcoded offset below must be re-derived by
+// hand from the new km\wdm.h.
+
 #[used]
 #[link_section = ".rdata"]
 static WUMATRACKER_PURPOSE: &str = "WumaTracker Player Position Service; reads only player world coordinates for the legitimate WumaTracker overlay service; no write, no generic pattern scan, no generic memory access, no runtime configuration.";
@@ -47,6 +60,10 @@ const ALLOC_TAG: u32 = u32::from_le_bytes(*b"WuAl");
 // documented Microsoft bugcheck, so it never collides with a system-defined one.
 const WUMATRACKER_BUGCHECK_CODE: ULONG = u32::from_le_bytes(*b"WuBC");
 
+// Verified by hand against km\wdm.h (WDK 10.0.28000.0, x64) struct _IRP:
+// AssociatedIrp.SystemBuffer @0x18, IoStatus.Status @0x30, IoStatus.Information
+// @0x38, Tail.Overlay.CurrentStackLocation @0xB8. See the size/align asserts
+// above — re-derive these from the header if IRP's layout ever changes.
 const IRP_IO_STATUS: usize = 0x30;
 const IRP_IO_INFORMATION: usize = 0x38;
 const IRP_SYSTEM_BUFFER: usize = 0x18;
@@ -61,6 +78,9 @@ const STACK_OUT_LEN: usize = 0x08;
 const STACK_IN_LEN: usize = 0x10;
 const STACK_IOCTL_CODE: usize = 0x18;
 
+// Verified by hand against km\wdm.h (WDK 10.0.28000.0, x64): struct
+// _DEVICE_OBJECT.Flags @0x30; struct _DRIVER_OBJECT.DeviceObject @0x08,
+// .DriverUnload @0x68, .MajorFunction[0] @0x70.
 const DEVICE_OBJECT_FLAGS: usize = 0x30;
 const DRV_DEVICE_OBJECT: usize = 0x08;
 const DRV_UNLOAD: usize = 0x68;

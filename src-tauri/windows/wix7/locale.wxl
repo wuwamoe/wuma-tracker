@@ -1,0 +1,8 @@
+<WixLocalization Culture="ko-kr" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+    <String Id="TauriLanguage" Value="1042" />
+    <String Id="TauriCodepage" Value="949" />
+    <String Id="LaunchApp" Value="Launch WumaTracker" />
+    <String Id="DowngradeErrorMessage" Value="A newer version of WumaTracker is already installed." />
+    <String Id="PathEnvVarFeature" Value="Add the install location of the WumaTracker executable to the PATH system environment variable. This allows the WumaTracker executable to be called from any location." />
+    <String Id="InstallAppFeature" Value="Installs WumaTracker." />
+</WixLocalization>

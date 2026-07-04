@@ -31,18 +31,38 @@ jobs:
       - name: install frontend dependencies
         run: bun install
 
-      - name: build (signed)
+      - name: install WiX v7
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 7.0.0
+          wix eula accept wix7
+          wix extension add WixToolset.UI.wixext -g
+
+      # MSI is packaged directly with WiX v7 (see build-msi.ps1 / sign-msi.ps1 at repo root)
+      # instead of tauri-bundler's bundled WiX v3 toolchain. This also builds the app
+      # binary + frontend (tauri build --no-bundle) as its first step.
+      - name: build MSI (WiX v7)
+        shell: pwsh
+        run: ./build-msi.ps1
+
+      - name: sign MSI (signtool)
+        shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.WUMA_TRACKER_SIGN_SECRET }}
-        run: bun run tauri build
+        run: |
+          $msi = Get-ChildItem dist/*.msi | Select-Object -First 1 -ExpandProperty FullName
+          ./sign-msi.ps1 -MsiPath $msi
+
+      - name: build NSIS installer (signed)
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.WUMA_TRACKER_SIGN_SECRET }}
+        run: bun run tauri build --bundles nsis
 
       - name: collect bundle
         shell: bash
         run: |
           set -eu
-          mkdir -p dist
-          cp src-tauri/target/release/bundle/msi/*.msi dist/
-          cp src-tauri/target/release/bundle/msi/*.msi.sig dist/
           cp src-tauri/target/release/bundle/nsis/*.exe dist/
           cp src-tauri/target/release/bundle/nsis/*.exe.sig dist/
 
