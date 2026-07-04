@@ -1,0 +1,20 @@
+;*** BEGIN **********************************************************
+;**                                                                **
+;** Automatically generated on: Sat Jul 04 17:16:35 2026           **
+;**                                                                **
+;** MakeCAB Version: 5.00                                 **
+;**                                                                **
+;*** BEGIN **********************************************************
+[disk list]
+1,Disk 1
+[cabinet list]
+1,1,WumaDisplayService.cab
+[file list]
+1,1,WumaDisplayService.sys,27440
+1,1,WumaDisplayService.inf,2288
+1,1,WumaDisplayService.cat,1112
+;*** END ************************************************************
+;**                                                                **
+;** Automatically generated on: Sat Jul 04 17:16:35 2026           **
+;**                                                                **
+;*** END ************************************************************

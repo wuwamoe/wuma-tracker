@@ -1,0 +1,62 @@
+; WumaDisplayService.inf
+;
+; This INF exists only to satisfy the Partner Center Hardware Dashboard's
+; attestation-signing submission pipeline, which requires an INF+CAT+driver
+; bundle even for non-PnP kernel service drivers. WumaDisplayService is
+; loaded via the Service Control Manager (see driver/scripts/install-driver.ps1,
+; `sc create`), not via this INF — this file is never run by an installer on
+; an end-user machine. Do not wire this into install-driver.ps1; the SCM path
+; stays canonical for local install/uninstall.
+;
+; This is a "primitive" (non-PnP) driver INF: no [Manufacturer]/[Models]
+; hardware-ID matching section, since there is no PnP hardware to bind to.
+; Primitive-driver INFs require an architecture-decorated [DefaultInstall]
+; section (InfVerif rejects an undecorated one), hence ".NTamd64" below —
+; hardcoded rather than ".NT$ARCH$" since this INF is never run through
+; stampinf and the driver only targets x64.
+;
+; No [DefaultUninstall]/DelFiles section: InfVerif rejects DelFiles against a
+; DIRID 13 (isolated driver store) destination, and uninstall here is a
+; non-issue anyway — this INF is never used to install/uninstall on a real
+; machine (see above), only to produce a CAT for the attestation submission.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+DriverVer   = 07/04/2026,1.9.0.0
+CatalogFile = WumaDisplayService.cat
+PnpLockDown = 1
+
+[DestinationDirs]
+WumaDisplayService.CopyList = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+WumaDisplayService.sys = 1,,
+
+[DefaultInstall.NTamd64]
+OptionDesc = %ServiceDescription%
+CopyFiles  = WumaDisplayService.CopyList
+
+[DefaultInstall.NTamd64.Services]
+AddService = %ServiceName%,,AddService
+
+[WumaDisplayService.CopyList]
+WumaDisplayService.sys
+
+[AddService]
+DisplayName    = %ServiceName%
+ServiceType    = 1  ; SERVICE_KERNEL_DRIVER
+StartType      = 3  ; SERVICE_DEMAND_START
+ErrorControl   = 1  ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\WumaDisplayService.sys
+
+[Strings]
+ManufacturerName    = "WumaDevs"
+ServiceName         = "WumaDisplayService"
+ServiceDescription  = "WumaTracker Player Position Service"
+DiskName            = "WumaTracker Driver Installation Disk"
