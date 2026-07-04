@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::path::PathBuf;
 
 #[cfg(windows)]
 const WIN_RELATIVE: &str = "Program Files\\Wuthering Waves\\Wuthering Waves Game\\Client\\Binaries\\Win64\\Client-Win64-Shipping.exe";
@@ -29,59 +28,26 @@ pub fn scan_game_candidates() -> Vec<String> {
     }
 }
 
+/// 게임을 실행만 하고 바로 놓아준다(fire-and-forget). attach는 항상 이름 기반으로
+/// 별도 수행되므로(`RtcSupervisor::attach_process`), 여기서는 프로세스 핸들을
+/// 붙잡아 둘 필요가 없다.
 #[cfg(windows)]
-pub fn launch_and_create_proc(
-    path: &str,
-    cache_dir: PathBuf,
-    scan_config: Option<crate::offsets::GWorldScanConfig>,
-) -> Result<crate::win_proc::WinProc> {
-    use std::os::windows::io::AsRawHandle;
-    use winapi::shared::minwindef::{DWORD, FALSE};
-    use winapi::um::handleapi::DuplicateHandle;
-    use winapi::um::processthreadsapi::GetCurrentProcess;
-    use winapi::um::winnt::HANDLE;
-
-    const DUPLICATE_SAME_ACCESS: DWORD = 0x00000002;
-
+pub fn spawn_game(path: &str) -> Result<()> {
     let game_dir = std::path::Path::new(path)
         .parent()
         .ok_or_else(|| anyhow::anyhow!("잘못된 경로: {}", path))?
         .to_path_buf();
 
-    let child = std::process::Command::new(path)
+    std::process::Command::new(path)
         .current_dir(&game_dir)
         .spawn()
         .map_err(|e| anyhow::anyhow!("게임 실행 실패: {}", e))?;
 
-    let pid = child.id();
-    let src_handle = child.as_raw_handle() as HANDLE;
-
-    let mut dup_handle: HANDLE = std::ptr::null_mut();
-    let ok = unsafe {
-        DuplicateHandle(
-            GetCurrentProcess(),
-            src_handle,
-            GetCurrentProcess(),
-            &mut dup_handle,
-            0,
-            FALSE,
-            DUPLICATE_SAME_ACCESS,
-        )
-    };
-
-    // Releasing the child handle here; dup_handle is an independent reference to the process.
-    drop(child);
-
-    if ok == 0 || dup_handle.is_null() {
-        anyhow::bail!("핸들 복제 실패: {}", std::io::Error::last_os_error());
-    }
-
-    log::info!("게임 실행됨, PID: {}, 핸들 복제 완료. 모듈 로드 대기 중...", pid);
-    crate::win_proc::WinProc::from_handle(dup_handle, pid, cache_dir, scan_config)
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
-pub fn launch_game(path: &str) -> Result<()> {
+pub fn spawn_game(path: &str) -> Result<()> {
     std::process::Command::new("open")
         .arg(path)
         .spawn()

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::{ffi::CStr, fs, mem, ptr::null_mut};
 
 use crate::offsets::{GWorldScanConfig, WuwaOffset};
-use crate::process_backend::ProcessBackend;
+use crate::process_backend::{ProcessBackend, select_and_walk};
 use crate::types::NativeError;
 use crate::types::NativeError::{PointerChainError, ValueReadError};
 use anyhow::{Context, Result, bail};
@@ -34,6 +34,12 @@ const BATCH_GAP: u64 = 4096;
 const MAX_BATCH_SIZE: usize = 256 * 1024;
 
 const CACHE_FILE: &str = "win_gworld_scan_cache.json";
+
+// 재스캔 스케줄 (poll() 호출 기준 연속 실패 횟수)
+// cold_start=true(초기 스캔 실패): 5초 → 30초 → 60초 (0.5초 주기 기준)
+// cold_start=false(정상, 일시적 오류): 30초 → 60초
+const RESCAN_SCHEDULE_COLD: &[u32] = &[10, 120, 240];
+const RESCAN_SCHEDULE_WARM: &[u32] = &[120, 240];
 
 // ── 패턴 파싱 ─────────────────────────────────────────────────────────────────
 
@@ -75,6 +81,11 @@ pub struct WinProc {
     gworld_rva: u64,
     cache_dir: PathBuf,
     scan_config: GWorldScanConfig,
+    cached_offset: Option<WuwaOffset>,
+    consecutive_failures: u32,
+    rescan_stage: usize,
+    /// 초기 GWorld 패턴 스캔이 실패한 채로 시작했는지 (재스캔 스케줄 선택에 사용)
+    cold_start: bool,
 }
 
 impl WinProc {
@@ -132,68 +143,20 @@ impl WinProc {
                 if gworld_rva != 0 { format!("{:X}", gworld_rva) } else { "폴백".to_string() }
             );
 
-            Ok(WinProc { pid, base_addr, handle, gworld_rva, cache_dir, scan_config })
+            let cold_start = gworld_rva == 0;
+            Ok(WinProc {
+                pid,
+                base_addr,
+                handle,
+                gworld_rva,
+                cache_dir,
+                scan_config,
+                cached_offset: None,
+                consecutive_failures: 0,
+                rescan_stage: 0,
+                cold_start,
+            })
         }
-    }
-
-    pub fn from_handle(
-        handle: HANDLE,
-        pid: u32,
-        cache_dir: PathBuf,
-        scan_config: Option<GWorldScanConfig>,
-    ) -> Result<Self> {
-        let scan_config = scan_config.unwrap_or_default();
-
-        let base_addr = Self::wait_for_base_addr(handle)?;
-
-        let gworld_rva = if scan_config.enabled {
-            let prefix = parse_prefix(&scan_config.prefix);
-            let suffix = parse_suffix(&scan_config.suffix);
-            match find_gworld_rva_with_cache(handle, base_addr, &cache_dir, &prefix, &suffix) {
-                Ok(rva) => rva,
-                Err(e) => {
-                    log::warn!("GWorld 스캔 실패, 오프셋 폴백 사용: {}", e);
-                    0
-                }
-            }
-        } else {
-            log::info!("GWorld 자동 탐색 비활성화됨 (원격 설정), 오프셋 폴백 사용");
-            0
-        };
-
-        log::info!(
-            "프로세스 직접 실행 연결됨! PID: {}, Base: {:X}, GWorld RVA: {}",
-            pid,
-            base_addr,
-            if gworld_rva != 0 { format!("{:X}", gworld_rva) } else { "폴백".to_string() }
-        );
-
-        Ok(WinProc { pid, base_addr, handle, gworld_rva, cache_dir, scan_config })
-    }
-
-    fn wait_for_base_addr(handle: HANDLE) -> Result<u64> {
-        const MAX_TRIES: u32 = 30;
-        for attempt in 0..MAX_TRIES {
-            let mut h_mod: HMODULE = null_mut();
-            let mut cb_needed: DWORD = 0;
-            let ok = unsafe {
-                EnumProcessModulesEx(
-                    handle,
-                    &mut h_mod,
-                    mem::size_of::<HMODULE>() as DWORD,
-                    &mut cb_needed,
-                    LIST_MODULES_DEFAULT,
-                )
-            };
-            if ok != 0 {
-                return Ok(h_mod as u64);
-            }
-            if attempt < MAX_TRIES - 1 {
-                log::info!("게임 모듈 로드 대기 중... ({}초 경과)", (attempt + 1) * 2);
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-        }
-        bail!("게임 시작 후 모듈 로드 대기 시간 초과 (60초)")
     }
 
     unsafe fn find_pid_by_name(name: &str) -> Option<u32> {
@@ -223,8 +186,8 @@ impl WinProc {
     }
 }
 
-impl ProcessBackend for WinProc {
-    fn is_alive(&self) -> bool {
+impl WinProc {
+    fn check_alive(&self) -> bool {
         if self.handle.is_null() {
             return false;
         }
@@ -237,46 +200,20 @@ impl ProcessBackend for WinProc {
         }
     }
 
-    fn read_bytes(&self, address: u64, buffer: &mut [u8]) -> Result<(), NativeError> {
-        unsafe {
-            let mut bytes_read = 0;
-
-            let success = ReadProcessMemory(
-                self.handle,
-                address as *const c_void,
-                buffer.as_mut_ptr() as *mut c_void,
-                buffer.len(),
-                &mut bytes_read,
-            );
-
-            if success != 0 && bytes_read == buffer.len() {
-                Ok(())
-            } else {
-                let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-                let hint = match code {
-                    299 => "[PARTIAL]",
-                    5   => "[ACCESS]",
-                    6   => "[INV_HDL]",
-                    _   => "",
-                };
-                let page = describe_page(self.handle, address);
-                Err(ValueReadError {
-                    message: format!("RPM@{:X} e{}{} {}", address, code, hint, page),
-                })
-            }
-        }
+    fn read_memory<T: Copy>(&self, address: u64) -> Result<T, NativeError> {
+        read_memory_win(self.handle, address)
     }
 
-    fn gworld_ready(&self) -> bool {
-        self.gworld_rva != 0
-    }
-
-    fn active_offset_name(&self, offset: &WuwaOffset) -> String {
-        if self.gworld_rva != 0 {
-            format!("{:X}", self.gworld_rva)
+    fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError> {
+        let (rva, source) = if self.gworld_rva != 0 {
+            (self.gworld_rva, "scan")
         } else {
-            format!("오프셋 {}", offset.name)
-        }
+            (offset.global_gworld, "fb")
+        };
+        let target = self.base_addr + rva;
+        self.read_memory::<u64>(target).map_err(|e| PointerChainError {
+            message: format!("gworld@{:X} rva={:X}[{}]: {}", target, rva, source, e),
+        })
     }
 
     fn rescan_gworld(&mut self) {
@@ -313,16 +250,103 @@ impl ProcessBackend for WinProc {
         }
     }
 
-    fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError> {
-        let (rva, source) = if self.gworld_rva != 0 {
-            (self.gworld_rva, "scan")
+    /// 연속 실패 횟수를 스케줄과 비교해 필요하면 GWorld를 재스캔한다.
+    fn maybe_rescan(&mut self, poll_failed: bool) {
+        if !poll_failed {
+            self.consecutive_failures = 0;
+            return;
+        }
+        self.consecutive_failures += 1;
+        let schedule = if self.cold_start { RESCAN_SCHEDULE_COLD } else { RESCAN_SCHEDULE_WARM };
+        if let Some(&threshold) = schedule.get(self.rescan_stage) {
+            if self.consecutive_failures >= threshold {
+                log::info!("{}회 연속 실패 → GWorld 재스캔 (시도 {})", threshold, self.rescan_stage + 1);
+                self.rescan_gworld();
+                self.rescan_stage += 1;
+                self.consecutive_failures = 0;
+                self.cached_offset = None;
+            }
+        }
+    }
+}
+
+impl ProcessBackend for WinProc {
+    fn poll(&mut self, offsets: &[WuwaOffset]) -> Result<crate::types::PlayerInfo, NativeError> {
+        if !self.check_alive() {
+            return Err(NativeError::ProcessTerminated);
+        }
+
+        let handle = self.handle;
+        let base_addr = self.base_addr;
+        let gworld_rva = self.gworld_rva;
+
+        let result = select_and_walk(
+            &mut self.cached_offset,
+            offsets,
+            |offset: &WuwaOffset| -> Result<u64, NativeError> {
+                let (rva, source) = if gworld_rva != 0 { (gworld_rva, "scan") } else { (offset.global_gworld, "fb") };
+                let target = base_addr + rva;
+                read_memory_win::<u64>(handle, target).map_err(|e| PointerChainError {
+                    message: format!("gworld@{:X} rva={:X}[{}]: {}", target, rva, source, e),
+                })
+            },
+            |addr| read_memory_win::<u64>(handle, addr),
+            |addr| read_memory_win::<crate::types::FTransformDouble>(handle, addr),
+            |addr| read_memory_win::<crate::types::FIntVector>(handle, addr),
+        );
+
+        self.maybe_rescan(result.is_err());
+        result
+    }
+
+    fn diagnostics(&self) -> String {
+        if self.gworld_rva != 0 {
+            format!("{:X}", self.gworld_rva)
         } else {
-            (offset.global_gworld, "fb")
-        };
-        let target = self.base_addr + rva;
-        self.read_memory::<u64>(target).map_err(|e| PointerChainError {
-            message: format!("gworld@{:X} rva={:X}[{}]: {}", target, rva, source, e),
-        })
+            self.cached_offset
+                .as_ref()
+                .map(|o| format!("오프셋 {}", o.name))
+                .unwrap_or_else(|| "탐색 중".to_string())
+        }
+    }
+}
+
+fn read_memory_win<T: Copy>(handle: HANDLE, address: u64) -> Result<T, NativeError> {
+    let mut value = mem::MaybeUninit::<T>::uninit();
+    let buffer = unsafe {
+        std::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, mem::size_of::<T>())
+    };
+    read_bytes_win(handle, address, buffer)?;
+    Ok(unsafe { value.assume_init() })
+}
+
+fn read_bytes_win(handle: HANDLE, address: u64, buffer: &mut [u8]) -> Result<(), NativeError> {
+    unsafe {
+        let mut bytes_read = 0;
+
+        let success = ReadProcessMemory(
+            handle,
+            address as *const c_void,
+            buffer.as_mut_ptr() as *mut c_void,
+            buffer.len(),
+            &mut bytes_read,
+        );
+
+        if success != 0 && bytes_read == buffer.len() {
+            Ok(())
+        } else {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            let hint = match code {
+                299 => "[PARTIAL]",
+                5   => "[ACCESS]",
+                6   => "[INV_HDL]",
+                _   => "",
+            };
+            let page = describe_page(handle, address);
+            Err(ValueReadError {
+                message: format!("RPM@{:X} e{}{} {}", address, code, hint, page),
+            })
+        }
     }
 }
 

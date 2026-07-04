@@ -1,89 +1,38 @@
 #[cfg(target_os = "macos")]
 use crate::mac_proc::MacProc as PlatformProc;
-use crate::offsets::{GWorldScanConfig, TrackerConfig, WuwaOffset};
-use crate::process_backend::{ProcessBackend, select_player_info};
-use crate::types::NativeError::PointerChainError;
+use crate::offsets::TrackerConfig;
+use crate::process_backend::ProcessBackend;
 use crate::types::{CollectorMessage, NativeError};
 #[cfg(windows)]
-use crate::win_proc::WinProc as PlatformProc;
-// ↑ 커널 드라이버로 교체 시 위 줄을 아래로 변경:
-// use crate::win_proc_driver::WinProcDriver as PlatformProc;
+use crate::win_proc_driver::WinProcDriver as PlatformProc;
+// ↑ 드라이버 없이 기존 ReadProcessMemory 방식으로 되돌리려면 위 줄을 아래로 변경:
+// use crate::win_proc::WinProc as PlatformProc;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("Native process tracking is supported only on Windows and macOS.");
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-// 재스캔 스케줄 (500ms 루프 기준 실패 횟수)
-// gworld_ready=false(ACE 미복호화): 5초 → 30초 → 60초
-// gworld_ready=true(정상, 일시적 오류):          30초 → 60초
-const RESCAN_SCHEDULE_COLD: &[u32] = &[10, 120, 240];
-const RESCAN_SCHEDULE_WARM: &[u32] = &[120, 240];
-
-/// OS별 게임 프로세스 래퍼
+/// OS별 게임 프로세스 래퍼.
+///
+/// attach와 좌표 조회를 구분하지 않는다 — `PlatformProc::poll()` 한 번이 "이미 붙어
+/// 있으면 읽고, 아니면 다시 찾아서 읽는" 것까지 전부 처리한다. 여기서는 그 결과를
+/// `NativeError::ProcessTerminated` 여부만으로 Disconnected/Connected 두 상태로만
+/// 나눠 다룬다.
 pub struct NativeCollector {
     proc: PlatformProc,
-    offset: Option<WuwaOffset>,
-    consecutive_failures: u32,
-    rescan_stage: usize,
-    cold_start: bool, // 초기 스캔 실패(ACE 미복호화) 여부
 }
 
 impl NativeCollector {
-    #[cfg(windows)]
-    pub fn from_win_proc(proc: crate::win_proc::WinProc) -> Self {
-        let cold_start = !proc.gworld_ready();
-        Self { proc, offset: None, consecutive_failures: 0, rescan_stage: 0, cold_start }
-    }
-
-    pub async fn new(proc_name: &str, cache_dir: PathBuf, scan_config: Option<GWorldScanConfig>) -> Result<Self> {
+    pub async fn new(proc_name: &str, cache_dir: PathBuf, scan_config: Option<crate::offsets::GWorldScanConfig>) -> Result<Self> {
         let proc_name = proc_name.to_string();
         let proc =
             tokio::task::spawn_blocking(move || PlatformProc::new(&proc_name, cache_dir, scan_config)).await??;
-        let cold_start = !proc.gworld_ready();
-        Ok(Self { proc, offset: None, consecutive_failures: 0, rescan_stage: 0, cold_start })
-    }
-
-    fn get_location(
-        &mut self,
-        available_offsets: &Option<Vec<WuwaOffset>>,
-    ) -> Result<crate::types::PlayerInfo, NativeError> {
-        let Some(variants) = available_offsets else {
-            return Err(PointerChainError {
-                message: "오프셋 데이터를 불러오는 중입니다...".to_string(),
-            });
-        };
-
-        match select_player_info(&self.proc, &mut self.offset, variants) {
-            Ok(info) => {
-                self.consecutive_failures = 0;
-                Ok(info)
-            }
-            Err(e) => {
-                self.consecutive_failures += 1;
-                let schedule = if self.cold_start { RESCAN_SCHEDULE_COLD } else { RESCAN_SCHEDULE_WARM };
-                if let Some(&threshold) = schedule.get(self.rescan_stage) {
-                    if self.consecutive_failures >= threshold {
-                        log::info!("{}회 연속 실패 → GWorld 재스캔 (시도 {})", threshold, self.rescan_stage + 1);
-                        self.proc.rescan_gworld();
-                        self.rescan_stage += 1;
-                        self.consecutive_failures = 0;
-                        self.offset = None;
-                    }
-                }
-                Err(e)
-            }
-        }
-    }
-
-    fn get_active_offset_name(&self) -> Option<String> {
-        self.offset
-            .as_ref()
-            .map(|offset| self.proc.active_offset_name(offset))
+        Ok(Self { proc })
     }
 }
 
@@ -94,54 +43,36 @@ pub async fn collection_loop(
     offsets_arc: Arc<Mutex<Option<TrackerConfig>>>,
 ) {
     let mut reported_offset: Option<String> = None;
-    let mut last_error_emit: Option<Instant> = None;
+    let mut last_error_emit: Option<std::time::Instant> = None;
     loop {
-        let offsets_snapshot: Option<Vec<WuwaOffset>> = offsets_arc.lock().await
-            .as_ref()
-            .map(|c| c.offsets.clone());
-        let result = {
-            // 1. 상태 관리자를 잠그고 공유 상태에 접근합니다.
-            let mut collector_opt_guard = collector_arc.lock().await;
+        let offsets_snapshot = offsets_arc.lock().await.as_ref().map(|c| c.offsets.clone());
 
-            // 2. Option이 Some일 때만 로직을 수행합니다.
-            //    (다른 곳에서 이미 None으로 만들었다면 루프를 종료합니다)
+        let (result, diagnostics) = {
+            let mut collector_opt_guard = collector_arc.lock().await;
             let Some(collector) = &mut *collector_opt_guard else {
                 log::info!("Collection loop exiting: collector is None");
                 break;
             };
 
-            // 3. get_location을 호출하고 결과를 매칭합니다.
-            match collector.get_location(&offsets_snapshot) {
-                // 성공 시 데이터 전송
-                Ok(loc) => {
-                    let offset_name = collector.get_active_offset_name();
-                    Ok((loc, offset_name))
-                }
-
-                // '프로세스 종료'는 치명적 오류
-                Err(NativeError::ProcessTerminated) => Err(NativeError::ProcessTerminated),
-
-                // 그 외 모든 오류는 일시적인 것으로 간주
-                Err(e) => Err(e),
-            }
+            let result = match &offsets_snapshot {
+                Some(offsets) => collector.proc.poll(offsets),
+                None => Err(NativeError::PointerChainError {
+                    message: "오프셋 데이터를 불러오는 중입니다...".to_string(),
+                }),
+            };
+            let diagnostics = collector.proc.diagnostics();
+            (result, diagnostics)
         };
 
         match result {
-            Ok((loc, offset_name)) => {
+            Ok(loc) => {
                 last_error_emit = None;
-                if let Some(name) = offset_name {
-                    if reported_offset.as_deref() != Some(name.as_str()) {
-                        // RtcSupervisor에게 OffsetFound 메시지를 보냅니다.
-                        if pm_tx
-                            .send(CollectorMessage::OffsetFound(name.clone()))
-                            .await
-                            .is_err()
-                        {
-                            log::info!("Collection loop exiting: no receiver");
-                            break;
-                        }
-                        reported_offset = Some(name);
+                if reported_offset.as_deref() != Some(diagnostics.as_str()) {
+                    if pm_tx.send(CollectorMessage::OffsetFound(diagnostics.clone())).await.is_err() {
+                        log::info!("Collection loop exiting: no receiver");
+                        break;
                     }
+                    reported_offset = Some(diagnostics);
                 }
                 if pm_tx.send(CollectorMessage::Data(loc)).await.is_err() {
                     log::info!("Collection loop exiting: no receiver");
@@ -149,19 +80,20 @@ pub async fn collection_loop(
                 }
             }
 
-            // '프로세스 종료'는 치명적 오류
+            // 대상 프로세스 자체가 없다는 신호만 "연결 해제"로 취급한다.
             Err(NativeError::ProcessTerminated) => {
                 log::info!("Collection loop exiting: process is terminated");
                 let _ = pm_tx.send(CollectorMessage::Terminated).await;
                 break;
             }
 
-            // 그 외 모든 오류는 일시적인 것으로 간주 (5초에 1번만 전송)
+            // 그 외 모든 오류(헬퍼/드라이버 불가, 포인터 체인 실패 등)는 연결은 유지된
+            // 채로의 일시적 오류로 간주한다 (5초에 1번만 전송).
             Err(e) => {
                 let should_emit = last_error_emit
                     .map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
                 if should_emit {
-                    last_error_emit = Some(Instant::now());
+                    last_error_emit = Some(std::time::Instant::now());
                     log::warn!("collect: {}", e);
                     if pm_tx
                         .send(CollectorMessage::TemporalError(e.user_message().to_string()))
@@ -174,7 +106,7 @@ pub async fn collection_loop(
                 }
             }
         }
-        // Sleep Phase
+
         tokio::select! {
             _ = cancel.cancelled() => {
                 log::info!("Collection loop exiting: exit signal received");

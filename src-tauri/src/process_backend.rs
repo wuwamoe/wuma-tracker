@@ -2,128 +2,30 @@ use crate::offsets::WuwaOffset;
 use crate::types::NativeError::{PointerChainError, ValueReadError};
 use crate::types::{FIntVector, FTransformDouble, NativeError, PlayerInfo};
 use std::f32::consts::PI;
-use std::mem::{self, MaybeUninit};
 
+/// 프로세스 백엔드가 노출해야 하는 유일한 액션.
+///
+/// "프로세스에 붙기"와 "좌표 읽기"를 분리하지 않는다 — attach는 백엔드 내부에서
+/// 알아서 처리하고(이미 붙어 있으면 재사용, 아니면 다시 찾는 식), 외부(native_collector)는
+/// 반환된 에러의 종류만으로 상태를 판단한다:
+/// - `NativeError::ProcessTerminated`: 대상 프로세스 자체가 없음 → 연결 해제로 취급.
+/// - 그 외 모든 에러: 프로세스는 여전히 붙어 있는 것으로 간주하는 일시적 오류.
 pub trait ProcessBackend {
-    fn is_alive(&self) -> bool;
-    fn read_bytes(&self, address: u64, buffer: &mut [u8]) -> Result<(), NativeError>;
-    fn read_gworld(&self, offset: &WuwaOffset) -> Result<u64, NativeError>;
-    fn rescan_gworld(&mut self) {}
+    fn poll(&mut self, offsets: &[WuwaOffset]) -> Result<PlayerInfo, NativeError>;
 
-    /// GWorld를 정상적으로 찾은 상태인지 반환한다.
-    /// Windows: 초기 스캔 성공 여부. macOS: 항상 true (심볼 테이블 기반).
-    fn gworld_ready(&self) -> bool { true }
-
-    fn active_offset_name(&self, offset: &WuwaOffset) -> String {
-        offset.name.clone()
-    }
-
-    /// 단일 호출로 PlayerInfo 전체를 반환한다 (fast path).
-    /// 기본 구현은 None을 반환해 기존 포인터 체인 경로를 사용하게 한다.
-    /// WinProcDriver처럼 드라이버 기반 백엔드는 이를 오버라이드해 IOCTL 1회로 처리한다.
-    fn get_player_info(&self, _offset: &WuwaOffset) -> Option<Result<PlayerInfo, NativeError>> {
-        None
-    }
-
-    fn read_memory<T: Copy>(&self, address: u64) -> Result<T, NativeError> {
-        if address == 0 {
-            return Err(PointerChainError { message: "addr=0".to_string() });
-        }
-
-        unsafe {
-            let mut value = MaybeUninit::<T>::uninit();
-            let buffer =
-                std::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, mem::size_of::<T>());
-
-            self.read_bytes(address, buffer)?;
-            Ok(value.assume_init())
-        }
-    }
+    /// UI에 표시할 진단 라벨 (어떤 오프셋/방식으로 값을 찾았는지)
+    fn diagnostics(&self) -> String;
 }
 
-pub fn select_player_info<B: ProcessBackend>(
-    backend: &B,
-    cached_offset: &mut Option<WuwaOffset>,
-    offsets: &[WuwaOffset],
-) -> Result<PlayerInfo, NativeError> {
-    if !backend.is_alive() {
-        return Err(NativeError::ProcessTerminated);
-    }
-
-    if let Some(offset) = cached_offset.as_ref() {
-        match read_player_info(backend, offset) {
-            Ok(location) => return Ok(location),
-            Err(e) => {
-                log::warn!("offset {} miss: {}", backend.active_offset_name(offset), e);
-            }
-        }
-        *cached_offset = None;
-    }
-
-    let mut first_err: Option<NativeError> = None;
-    for (i, offset) in offsets.iter().enumerate() {
-        // fast path: 드라이버 백엔드는 IOCTL 1회로 전체 처리
-        if let Some(result) = backend.get_player_info(offset) {
-            match result {
-                Ok(info) => {
-                    log::info!(
-                        "Offset variant #{} ({}) fast-path succeeded.",
-                        i + 1,
-                        backend.active_offset_name(offset)
-                    );
-                    *cached_offset = Some(offset.clone());
-                    return Ok(info);
-                }
-                Err(e) => {
-                    log::debug!(
-                        "Offset variant #{} ({}) fast-path failed: {}",
-                        i + 1,
-                        backend.active_offset_name(offset),
-                        e
-                    );
-                    if first_err.is_none() { first_err = Some(e); }
-                    continue;
-                }
-            }
-        }
-        // slow path: 기존 포인터 체인 (WinProc, MacProc)
-        match read_player_info(backend, offset) {
-            Ok(location) => {
-                log::info!(
-                    "Offset variant #{} ({}) succeeded.",
-                    i + 1,
-                    backend.active_offset_name(offset)
-                );
-                *cached_offset = Some(offset.clone());
-                return Ok(location);
-            }
-            Err(e) => {
-                log::debug!(
-                    "Offset variant #{} ({}) failed: {}",
-                    i + 1,
-                    backend.active_offset_name(offset),
-                    e
-                );
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
-            }
-        }
-    }
-
-    // 모든 variant 실패 시, 첫 variant의 실제 실패 원인을 그대로 노출한다.
-    // (실패 단계 = GWorld(.data) read 인지, 이후 포인터 체인인지 + OS 에러 코드 포함)
-    Err(first_err.unwrap_or(PointerChainError {
-        message: "사용 가능한 버전 값을 찾지 못했습니다.".to_string(),
-    }))
-}
-
-fn read_player_info<B: ProcessBackend>(
-    backend: &B,
+/// GWorld로부터 시작하는 UE 포인터 체인을 순회해 PlayerInfo를 얻는다.
+/// 사용자 공간에서 직접 메모리를 읽는 백엔드(WinProc, MacProc)가 공용으로 사용한다.
+pub fn walk_pointer_chain(
+    mut read_u64: impl FnMut(u64) -> Result<u64, NativeError>,
+    mut read_transform: impl FnMut(u64) -> Result<FTransformDouble, NativeError>,
+    mut read_ivec: impl FnMut(u64) -> Result<FIntVector, NativeError>,
+    gworld: u64,
     offset: &WuwaOffset,
 ) -> Result<PlayerInfo, NativeError> {
-    let gworld = backend.read_gworld(offset)?;
-
     let targets = [
         ("OwningGameInstance", offset.uworld_owninggameinstance),
         ("TArray<*LocalPlayers>", offset.ugameinstance_localplayers),
@@ -136,7 +38,7 @@ fn read_player_info<B: ProcessBackend>(
     let mut last_addr = gworld;
     for (name, field_offset) in targets {
         let target = last_addr + field_offset;
-        match backend.read_memory::<u64>(target) {
+        match read_u64(target) {
             Ok(v) => {
                 last_addr = v;
             }
@@ -152,11 +54,9 @@ fn read_player_info<B: ProcessBackend>(
     }
 
     let transform_addr = last_addr + offset.uscenecomponent_componenttoworld;
-    let location = backend
-        .read_memory::<FTransformDouble>(transform_addr)
-        .map_err(|e| ValueReadError {
-            message: format!("ftrans@{:X}: {}", transform_addr, e),
-        })?;
+    let location = read_transform(transform_addr).map_err(|e| ValueReadError {
+        message: format!("ftrans@{:X}: {}", transform_addr, e),
+    })?;
 
     let (roll, pitch, yaw) = quat_to_euler(
         location.rot_x,
@@ -166,18 +66,14 @@ fn read_player_info<B: ProcessBackend>(
     );
 
     let persistent_level_addr = gworld + offset.uworld_persistentlevel;
-    let persistent_level = backend
-        .read_memory::<u64>(persistent_level_addr)
-        .map_err(|e| PointerChainError {
-            message: format!("plevel@{:X}: {}", persistent_level_addr, e),
-        })?;
+    let persistent_level = read_u64(persistent_level_addr).map_err(|e| PointerChainError {
+        message: format!("plevel@{:X}: {}", persistent_level_addr, e),
+    })?;
 
     let world_origin_addr = persistent_level + offset.ulevel_lastworldorigin;
-    let root_location = backend
-        .read_memory::<FIntVector>(world_origin_addr)
-        .map_err(|e| ValueReadError {
-            message: format!("worigin@{:X}: {}", world_origin_addr, e),
-        })?;
+    let root_location = read_ivec(world_origin_addr).map_err(|e| ValueReadError {
+        message: format!("worigin@{:X}: {}", world_origin_addr, e),
+    })?;
 
     Ok(PlayerInfo {
         x: location.loc_x + (root_location.x as f32),
@@ -189,11 +85,60 @@ fn read_player_info<B: ProcessBackend>(
     })
 }
 
+/// offset 후보들을 순회하며 `walk_pointer_chain`을 시도하고, 성공한 offset을 캐싱한다.
+/// 캐싱된 offset이 있으면 그것부터 재시도하고, 실패하면 캐시를 버리고 전체 재순회한다.
+pub fn select_and_walk(
+    cached_offset: &mut Option<WuwaOffset>,
+    offsets: &[WuwaOffset],
+    mut read_gworld: impl FnMut(&WuwaOffset) -> Result<u64, NativeError>,
+    mut read_u64: impl FnMut(u64) -> Result<u64, NativeError>,
+    mut read_transform: impl FnMut(u64) -> Result<FTransformDouble, NativeError>,
+    mut read_ivec: impl FnMut(u64) -> Result<FIntVector, NativeError>,
+) -> Result<PlayerInfo, NativeError> {
+    if let Some(offset) = cached_offset.clone() {
+        if let Ok(gworld) = read_gworld(&offset) {
+            match walk_pointer_chain(&mut read_u64, &mut read_transform, &mut read_ivec, gworld, &offset) {
+                Ok(info) => return Ok(info),
+                Err(e) => log::warn!("offset {} miss: {}", offset.name, e),
+            }
+        }
+        *cached_offset = None;
+    }
+
+    let mut first_err: Option<NativeError> = None;
+    for (i, offset) in offsets.iter().enumerate() {
+        let gworld = match read_gworld(offset) {
+            Ok(g) => g,
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                continue;
+            }
+        };
+
+        match walk_pointer_chain(&mut read_u64, &mut read_transform, &mut read_ivec, gworld, offset) {
+            Ok(info) => {
+                log::info!("Offset variant #{} ({}) succeeded.", i + 1, offset.name);
+                *cached_offset = Some(offset.clone());
+                return Ok(info);
+            }
+            Err(e) => {
+                log::debug!("Offset variant #{} ({}) failed: {}", i + 1, offset.name, e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+
+    Err(first_err.unwrap_or(PointerChainError {
+        message: "사용 가능한 버전 값을 찾지 못했습니다.".to_string(),
+    }))
+}
+
 /// 포인터 값의 타당성을 분류해 실패 원인 진단을 돕는다.
-/// - NULL/거의NULL: 게임 상태 문제(아직 월드 미진입, 폰 없음 등) 또는 오프셋이 null 슬롯을 가리킴
-/// - 비정상범위: 오프셋/버전 불일치로 엉뚱한 값을 따라감, 또는 ACE의 포인터 암호화/셔플 의심
-/// - 정상범위인데 읽기 실패: 페이지 보호/해제 의심
-fn classify_ptr(p: u64) -> &'static str {
+pub fn classify_ptr(p: u64) -> &'static str {
     const USERMODE_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
     if p == 0 { "NULL" }
     else if p < 0x1_0000 { "~NULL" }

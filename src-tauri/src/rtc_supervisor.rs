@@ -211,41 +211,43 @@ impl RtcSupervisor {
         Ok(())
     }
 
+    /// 게임을 실행한 뒤 이름 기반으로 붙는다. 프로세스 핸들을 직접 넘겨받는 대신
+    /// `attach_process`와 동일한 경로를 재사용하되, 막 실행된 프로세스가 모듈을 로드할
+    /// 시간을 벌기 위해 짧은 간격으로 재시도한다. 백엔드(드라이버/RPM)에 무관하게 동작한다.
     pub async fn do_launch_and_attach(&mut self, app_handle: AppHandle, path: &str) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            // macOS는 번들(.app) 경로와 내부 실행 파일 이름이 다를 수 있어
+            // 이름 기반 자동 연결을 시도하지 않는다 (기존 동작 유지: 실행만 함).
+            return crate::game_launcher::spawn_game(path).map_err(|e| e.to_string());
+        }
+
         #[cfg(windows)]
         {
             if self.collector_state.instance.lock().await.is_some() {
                 self.detach_process().await;
             }
 
-            let path_str = path.to_string();
-            let cache_dir = app_handle
-                .path()
-                .app_config_dir()
-                .map_err(|e| e.to_string())?;
+            crate::game_launcher::spawn_game(path).map_err(|e| e.to_string())?;
 
-            let scan_config = self.offsets.lock().await
-                .as_ref()
-                .map(|c| c.gworld_scan.clone());
+            let proc_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| "잘못된 게임 경로입니다.".to_string())?
+                .to_string();
 
-            let win_proc = tokio::task::spawn_blocking(move || {
-                crate::game_launcher::launch_and_create_proc(&path_str, cache_dir, scan_config)
-            })
-            .await
-            .map_err(|e| format!("태스크 실패: {}", e))?
-            .map_err(|e| e.to_string())?;
-
-            let collector = NativeCollector::from_win_proc(win_proc);
-            *self.collector_state.instance.lock().await = Some(collector);
-            log::info!("Game launched and attached via process handle.");
-            self.try_start_collector().await;
-            util::mutate_global_state(&app_handle, |s| s.proc_state = 1);
-            Ok(())
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            crate::game_launcher::launch_game(path).map_err(|e| e.to_string())
+            const MAX_TRIES: u32 = 30;
+            for attempt in 0..MAX_TRIES {
+                match self.attach_process(app_handle.clone(), &proc_name).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt + 1 < MAX_TRIES => {
+                        log::info!("게임 프로세스 대기 중... ({}/{}): {}", attempt + 1, MAX_TRIES, e);
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Err("게임 시작 후 연결 시간 초과 (60초)".to_string())
         }
     }
 

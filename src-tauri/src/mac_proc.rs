@@ -1,5 +1,5 @@
 use crate::offsets::WuwaOffset;
-use crate::process_backend::ProcessBackend;
+use crate::process_backend::{ProcessBackend, select_and_walk};
 use crate::types::NativeError;
 use crate::types::NativeError::PointerChainError;
 use anyhow::{Context, Result, bail};
@@ -59,6 +59,7 @@ pub struct MacProc {
     pid: c_int,
     task: MachTaskPort,
     gworld_symbol_addr: u64,
+    cached_offset: Option<WuwaOffset>,
 }
 
 struct MachTaskPort {
@@ -133,6 +134,7 @@ impl MacProc {
             pid,
             task,
             gworld_symbol_addr,
+            cached_offset: None,
         })
     }
 
@@ -408,31 +410,39 @@ impl MacProc {
 }
 
 impl ProcessBackend for MacProc {
-    fn is_alive(&self) -> bool {
-        unsafe { kill(self.pid, 0) == 0 }
+    fn poll(&mut self, offsets: &[WuwaOffset]) -> Result<crate::types::PlayerInfo, NativeError> {
+        if unsafe { kill(self.pid, 0) } != 0 {
+            return Err(NativeError::ProcessTerminated);
+        }
+
+        let task = &self.task;
+        let gworld_symbol_addr = self.gworld_symbol_addr;
+
+        select_and_walk(
+            &mut self.cached_offset,
+            offsets,
+            |_offset: &WuwaOffset| -> Result<u64, NativeError> {
+                read_task_memory::<u64>(task, gworld_symbol_addr).map_err(|e| PointerChainError {
+                    message: format!(
+                        "_GWorld 위치 ({:X})의 주소 값을 읽지 못했습니다: {}",
+                        gworld_symbol_addr, e
+                    ),
+                })
+            },
+            |addr| read_task_memory::<u64>(task, addr),
+            |addr| read_task_memory::<crate::types::FTransformDouble>(task, addr),
+            |addr| read_task_memory::<crate::types::FIntVector>(task, addr),
+        )
     }
 
-    fn read_bytes(&self, address: u64, buffer: &mut [u8]) -> Result<(), NativeError> {
-        self.task
-            .read_bytes(address, buffer)
-            .map_err(|e| NativeError::ValueReadError {
-                message: e.to_string(),
-            })
-    }
-
-    fn read_gworld(&self, _offset: &WuwaOffset) -> Result<u64, NativeError> {
-        self.read_memory::<u64>(self.gworld_symbol_addr)
-            .map_err(|e| PointerChainError {
-                message: format!(
-                    "_GWorld 위치 ({:X})의 주소 값을 읽지 못했습니다: {}",
-                    self.gworld_symbol_addr, e
-                ),
-            })
-    }
-
-    fn active_offset_name(&self, _offset: &WuwaOffset) -> String {
+    fn diagnostics(&self) -> String {
         format!("{:X}", self.gworld_symbol_addr)
     }
+}
+
+fn read_task_memory<T: Copy>(task: &MachTaskPort, address: u64) -> Result<T, NativeError> {
+    task.read_memory::<T>(address)
+        .map_err(|e| NativeError::ValueReadError { message: e.to_string() })
 }
 
 impl MachTaskPort {
