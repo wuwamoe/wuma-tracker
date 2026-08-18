@@ -95,6 +95,18 @@
                 <File Id="DriverSys" Source="$(var.DriverSysPath)" KeyPath="yes" Checksum="yes" />
             </Component>
 
+            <!-- Plain .ps1 files the RegisterDriverServiceDeferred/
+                 UnregisterDriverServiceDeferred custom actions below invoke by
+                 path, instead of embedding the logic as one giant PowerShell
+                 one-liner inside an ExeCommand attribute (see the comment on
+                 those CustomAction elements for why that was worth avoiding). -->
+            <Component Id="RegisterDriverScript" Guid="1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f">
+                <File Id="RegisterDriverScript" Source="$(var.RegisterDriverScriptPath)" KeyPath="yes" />
+            </Component>
+            <Component Id="UnregisterDriverScript" Guid="2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a">
+                <File Id="UnregisterDriverScript" Source="$(var.UnregisterDriverScriptPath)" KeyPath="yes" />
+            </Component>
+
             <Component Id="CMP_UninstallShortcut">
                 <Shortcut Id="UninstallShortcut"
                           Name="명조 맵스 트래커 삭제"
@@ -140,6 +152,8 @@
 
             <Feature Id="DriverFeature" Title="Player Position Driver" Level="1" AllowAdvertise="no" AllowAbsent="no">
                 <ComponentRef Id="DriverSys" />
+                <ComponentRef Id="RegisterDriverScript" />
+                <ComponentRef Id="UnregisterDriverScript" />
             </Feature>
 
             <Feature Id="Environment" Title="PATH Environment Variable" Description="!(loc.PathEnvVarFeature)" Level="1">
@@ -190,65 +204,55 @@
              comment on the DriverSys component for why this isn't
              ServiceInstall/ServiceControl.
 
-             [#DriverSys] (the installed .sys path) is only resolvable while
-             formatting is still allowed, i.e. from an *immediate* custom
-             action; deferred custom actions run out-of-process as SYSTEM
-             with formatting locked down to prevent property injection, and
-             can only see the single literal token [CustomActionData]. So an
-             immediate CustomAction captures the formatted sc.exe command
-             line into a property NAMED AFTER the deferred action it feeds
-             (that's how MSI decides which property to copy into
-             CustomActionData for a given deferred action) — this is the
-             standard MSI two-step pattern for passing dynamic data into a
-             deferred custom action.
+             The actual logic lives in driver/scripts/msi-register-driver.ps1
+             and msi-unregister-driver.ps1 (installed alongside the app — see
+             the RegisterDriverScript/UnregisterDriverScript components
+             above), NOT inline in ExeCommand. It used to be inline, and that
+             was a mistake: MSI's "Formatted" string type reserves `{`/`}` for
+             conditional text blocks and `[...]` for property references, so
+             every literal PowerShell brace/bracket in an inline command has
+             to be hand-escaped as `[\{]`/`[\}]`/`[\[]`/`[\]]` — get even one
+             wrong and Windows Installer silently drops a chunk of the
+             command (observed firsthand: error 1722, with the executed
+             command missing an entire braced section). Calling a real .ps1
+             file sidesteps the whole problem — the only thing left in
+             ExeCommand is `[INSTALLDIR]`, which is a normal public property
+             (all-uppercase name) and, unlike the `[#FileId]` file-key syntax,
+             is available directly in a deferred action's formatted string
+             without needing the immediate-action/CustomActionData two-step
+             this file used to use to smuggle `[#DriverSys]`'s resolved path
+             across the immediate/deferred boundary.
 
-             RegisterDriverServiceDeferred self-heals regardless of *why* the
-             service might already be registered: it first checks whether
-             WumaDisplayService exists at all and, if so, stops + deletes +
-             waits for it to be fully gone (mirroring install-driver.ps1's own
-             stop/delete/poll sequence) before creating it fresh. This covers
-             two distinct cases with one code path:
-               1. A same-version REINSTALL/repair (REINSTALLMODE=amus, set at
-                  the top of this file) — MajorUpgrade/RemoveExistingProducts
-                  never runs for this, REMOVE is never set, so
-                  UnregisterDriverServiceDeferred below never fires, and the
-                  service is still actively registered when this action runs.
-                  Without the upfront stop+delete here, `sc create` would
-                  fail with 1073 (service already exists) — NOT 1072 — which
-                  the retry loop below does not retry, failing the whole
-                  install.
-               2. A real major upgrade, where RemoveExistingProducts already
-                  deleted the old registration moments ago but the SCM may
-                  not have finished tearing it down yet — `sc create` can
-                  transiently fail with 1072 until that completes, which the
-                  retry loop below does handle. -->
-        <CustomAction Id="SetRegisterDriverServiceDeferred"
-                      Property="RegisterDriverServiceDeferred"
-                      Value="[#DriverSys]" />
+             msi-register-driver.ps1 self-heals regardless of *why* the
+             service might already be registered — see that file for the
+             two cases (same-version REINSTALL/repair vs. a real major
+             upgrade) this covers. -->
         <CustomAction Id="RegisterDriverServiceDeferred"
                       Directory="INSTALLDIR"
                       Execute="deferred"
                       Impersonate="no"
                       Return="check"
-                      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;$ErrorActionPreference='Stop'; sc.exe query WumaDisplayService | Out-Null; if ($LASTEXITCODE -eq 0) { sc.exe stop WumaDisplayService | Out-Null; for ($i = 0; $i -lt 20; $i++) { $s = (sc.exe query WumaDisplayService 2&gt;$null) -join ' '; if ($s -match 'STOPPED') { break }; Start-Sleep -Milliseconds 500 }; sc.exe delete WumaDisplayService | Out-Null; for ($i = 0; $i -lt 10; $i++) { sc.exe query WumaDisplayService 2&gt;$null | Out-Null; if ($LASTEXITCODE -ne 0) { break }; Start-Sleep -Milliseconds 500 } }; for ($i = 0; $i -lt 10; $i++) { sc.exe create WumaDisplayService type= kernel start= demand error= normal binPath= '[CustomActionData]' | Out-Null; if ($LASTEXITCODE -eq 0) { break }; if ($LASTEXITCODE -ne 1072) { exit $LASTEXITCODE }; Start-Sleep -Milliseconds 500 }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; sc.exe start WumaDisplayService | Out-Null; exit 0&quot;" />
+                      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]msi-register-driver.ps1&quot; -SysPath &quot;[INSTALLDIR]WumaDisplayService.sys&quot;" />
 
         <CustomAction Id="UnregisterDriverServiceDeferred"
                       Directory="INSTALLDIR"
                       Execute="deferred"
                       Impersonate="no"
                       Return="ignore"
-                      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;sc.exe stop WumaDisplayService | Out-Null; Start-Sleep -Milliseconds 500; sc.exe delete WumaDisplayService | Out-Null&quot;" />
+                      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]msi-unregister-driver.ps1&quot;" />
 
         <InstallExecuteSequence>
-            <!-- Unconditional — runs for install, upgrade, repair, AND
+            <!-- Deferred actions (this one included) can only be scheduled
+                 between InstallInitialize and InstallFinalize — anywhere
+                 earlier (e.g. After="CostFinalize", which sits before
+                 InstallInitialize) fails at runtime with MSI error 2762
+                 ("Cannot write script record"), not at build/validation time.
+                 Unconditional — runs for install, upgrade, repair, AND
                  uninstall alike, before anything else touches app files or
                  the driver service. -->
-            <Custom Action="CloseAppDeferred" After="CostFinalize" />
-            <!-- Formats [#DriverSys] while formatting is still allowed, before
-                 InstallFinalize's deferred actions run. -->
-            <Custom Action="SetRegisterDriverServiceDeferred" After="CloseAppDeferred" Condition="NOT REMOVE" />
-            <!-- After InstallFiles so the .sys is actually on disk when sc.exe
-                 create's binPath is validated/started. -->
+            <Custom Action="CloseAppDeferred" After="InstallInitialize" />
+            <!-- After InstallFiles so the .sys (and the register script
+                 itself) are actually on disk before this runs. -->
             <Custom Action="RegisterDriverServiceDeferred" After="InstallFiles" Condition="NOT REMOVE" />
             <!-- Before RemoveFiles so the driver is unloaded (not holding the
                  .sys open) before the file itself gets deleted. Runs for a
