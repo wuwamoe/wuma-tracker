@@ -89,12 +89,6 @@ pub enum NativeError {
     #[error("{message}")]
     ValueReadError { message: String },
 
-    #[error("helper_unavailable")]
-    HelperUnavailable,
-
-    #[error("helper_unauthorized")]
-    HelperUnauthorized,
-
     #[error("driver_unavailable")]
     DriverUnavailable,
 }
@@ -104,8 +98,6 @@ impl NativeError {
     pub fn user_message(&self) -> &'static str {
         match self {
             NativeError::ProcessTerminated => "게임 프로세스가 종료되었습니다.",
-            NativeError::HelperUnavailable => "헬퍼 서비스에 연결할 수 없습니다. 헬퍼가 실행 중인지 확인하세요.",
-            NativeError::HelperUnauthorized => "헬퍼 서비스 접근이 거부되었습니다.",
             NativeError::DriverUnavailable => "드라이버를 사용할 수 없습니다. 드라이버가 로드되어 있는지 확인하세요.",
             NativeError::PointerChainError { message }
             | NativeError::ValueReadError { message } => {

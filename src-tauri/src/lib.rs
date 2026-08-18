@@ -12,7 +12,7 @@ mod signaling_handler;
 mod types;
 mod util;
 #[cfg(windows)]
-mod win_proc;
+mod driver_service;
 #[cfg(windows)]
 mod win_proc_driver;
 
@@ -281,6 +281,11 @@ pub async fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // 재부팅 후엔 드라이버 서비스(start= demand)를 아무도 다시 시작해주지
+            // 않으므로, 앱 실행 시점에 직접 보장한다 (driver_service.rs 참고).
+            #[cfg(windows)]
+            driver_service::ensure_running();
+
             // GlobalState 변경을 감지해 프론트엔드로 emit하는 백그라운드 태스크
             let mut state_rx = app.state::<TauriState>().global_state.subscribe();
             let emit_handle = app.handle().clone();
@@ -402,6 +407,12 @@ pub async fn run() {
         .expect("error while building tauri application");
 
     app.run_return(|_app_handle, _event| {});
+
+    // 트레이로 숨겨질 때(WindowEvent::CloseRequested)는 여기 안 오고 계속
+    // 트래킹함 — run_return이 실제로 반환하는 건 앱이 진짜로 종료될 때뿐이므로
+    // (트레이 메뉴 "종료" -> app.exit(0)), 드라이버 서비스 정지도 여기서만 한다.
+    #[cfg(windows)]
+    driver_service::stop();
 
     println!("Tauri app window closed. Starting final cleanup...");
     shutdown_token.cancel();

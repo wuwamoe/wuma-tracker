@@ -45,9 +45,11 @@ $existing = sc.exe query $ServiceName 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "기존 서비스 발견, 중지+삭제 후 재설치합니다." -ForegroundColor Yellow
 
-    # 헬퍼가 디바이스 핸들을 열어둔 채로 떠 있으면 드라이버 언로드가 끝나지 않아
-    # 서비스가 "삭제 대기(marked for deletion, exit 1072)" 상태로 걸릴 수 있다.
-    Stop-Process -Name wuma_tracker_helper -Force -ErrorAction SilentlyContinue
+    # 앱(wuma-tracker.exe)이 디바이스 핸들을 열어둔 채로 떠 있으면 드라이버 언로드가
+    # 끝나지 않아 서비스가 "삭제 대기(marked for deletion, exit 1072)" 상태로 걸릴 수
+    # 있다. win_proc_driver.rs는 poll 1회마다 핸들을 열고 바로 닫으므로 보통 문제가
+    # 안 되지만, 앱이 poll 도중에 멈춰 있으면 여전히 걸릴 수 있어 안전하게 종료한다.
+    Stop-Process -Name wuma-tracker -Force -ErrorAction SilentlyContinue
 
     sc.exe stop $ServiceName | Out-Null
 

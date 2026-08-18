@@ -1,6 +1,6 @@
 [package]
 name = "wuma-tracker"
-version = "1.9.0"
+version = "2.0.0"
 description = "명조 맵스 트래커"
 authors = ["wumadevs"]
 edition = "2024"
@@ -49,7 +49,7 @@ tauri-plugin-single-instance = "2.2.4"
 tauri-plugin-updater = "2.8.1"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3.9", features = ["fileapi", "handleapi", "ioapiset", "memoryapi", "minwindef", "namedpipeapi", "ntdef", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "tlhelp32", "winnt", "minwinbase", "winuser"] }
+winapi = { version = "0.3.9", features = ["fileapi", "handleapi", "ioapiset", "memoryapi", "minwindef", "namedpipeapi", "ntdef", "processthreadsapi", "psapi", "securitybaseapi", "shellapi", "tlhelp32", "winnt", "minwinbase", "winuser", "winsvc"] }
 windows = { version = "0.62.2", features = [
     "Services_Store",
     "Foundation",

@@ -18,7 +18,8 @@ pub trait ProcessBackend {
 }
 
 /// GWorld로부터 시작하는 UE 포인터 체인을 순회해 PlayerInfo를 얻는다.
-/// 사용자 공간에서 직접 메모리를 읽는 백엔드(WinProc, MacProc)가 공용으로 사용한다.
+/// 사용자 공간에서 직접 메모리를 읽는 백엔드(MacProc)가 사용한다. Windows는 커널
+/// 드라이버(win_proc_driver.rs)가 이 순회를 자체적으로 하므로 이 헬퍼를 쓰지 않는다.
 pub fn walk_pointer_chain(
     mut read_u64: impl FnMut(u64) -> Result<u64, NativeError>,
     mut read_transform: impl FnMut(u64) -> Result<FTransformDouble, NativeError>,

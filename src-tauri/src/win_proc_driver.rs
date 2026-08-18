@@ -1,18 +1,24 @@
 /// 커널 드라이버 기반 프로세스 백엔드
 ///
-/// `ProcessBackend`의 유일한 액션인 `poll()`을 헬퍼 IPC 1회 요청으로 구현한다.
-/// native_collector.rs의 `use crate::win_proc::WinProc as PlatformProc;` 한 줄을
-/// `use crate::win_proc_driver::WinProcDriver as PlatformProc;` 으로 바꾸면 교체 완료.
+/// `ProcessBackend`의 유일한 액션인 `poll()`을 드라이버 IOCTL 1회 요청으로 구현한다.
+/// 이 백엔드가 Windows의 유일한 구현이다(native_collector.rs에서
+/// `use crate::win_proc_driver::WinProcDriver as PlatformProc;`).
+/// 유저모드에서 직접 `ReadProcessMemory`로 스캔하던 예전 구현(`win_proc.rs`)은
+/// 삭제됐다 — 드라이버가 이미 이름으로 대상 프로세스를 찾아 하드코딩된 체인을
+/// 읽는 것까지 전부 처리하므로 되돌아갈 이유가 없다.
 ///
-/// 이 앱은 드라이버를 직접 열지 않는다. 모든 좌표 조회는 헬퍼 서비스의 named pipe
-/// (`\\.\pipe\WumaTrackerHelper`)를 통해서만 이뤄지며, 헬퍼가 실제로
-/// `\\.\WumaDisplayService`를 열고 IOCTL_GET_LOCATION을 호출한다. 요청/응답 온-와이어
-/// 레이아웃은 `driver/shared/ioctls.rs`가 원본(source of truth)이다.
+/// 이 앱은 `\\.\WumaDisplayService`를 직접 열고 `IOCTL_GET_LOCATION`을 직접 호출한다
+/// (더 이상 헬퍼 서비스/named pipe를 거치지 않음 — 앱이 이미 관리자 권한으로만
+/// 실행되므로, 별도 프로세스가 핸들을 대신 들고 있어야 할 이유가 없다는 판단.
+/// `driver/docs/DIRECT-ACCESS-PLAN.md` 참고). 요청/응답 온-와이어 레이아웃은
+/// `driver/shared/ioctls.rs`가 원본(source of truth)이다.
 ///
-/// 프로세스 attach 자체도 드라이버/헬퍼가 매 호출마다 내부적으로 처리하므로
-/// (이름으로 프로세스를 찾아 붙는 것까지 IOCTL 한 번에 포함), 이 백엔드는 별도의
-/// "붙어있는 핸들"을 들고 있지 않는다 — `poll()`만 반복 호출하면 된다.
-use std::io::{Read, Write};
+/// 프로세스 attach 자체도 드라이버가 매 호출마다 내부적으로 처리하므로 (이름으로
+/// 프로세스를 찾아 붙는 것까지 IOCTL 한 번에 포함), 이 백엔드는 별도의 "붙어있는
+/// 핸들"을 들고 있지 않는다 — `poll()`만 반복 호출하면 된다. 드라이버 디바이스 핸들
+/// 자체는 매 poll마다 새로 열고 닫는다: 드라이버가 단일 인스턴스 핸들만 허용하므로
+/// (동시에 하나의 열린 핸들만 허용), 핸들을 오래 들고 있을 이유가 없고, 오히려 앱이
+/// 재시작되거나 여러 인스턴스가 뜨는 경우를 자연스럽게 처리한다.
 use std::mem;
 use std::path::PathBuf;
 
@@ -20,35 +26,20 @@ use anyhow::{bail, Result};
 use winapi::um::{
     fileapi::{CreateFileW, OPEN_EXISTING},
     handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
-    winnt::{GENERIC_READ, GENERIC_WRITE, HANDLE},
+    ioapiset::DeviceIoControl,
+    winnt::{GENERIC_READ, GENERIC_WRITE},
 };
 
 use crate::offsets::{GWorldScanConfig, WuwaOffset};
 use crate::process_backend::ProcessBackend;
 use crate::types::NativeError;
 
-const PIPE_NAME: &str = r"\\.\pipe\WumaTrackerHelper";
-const REQ_GET_LOCATION: u32 = 1;
-
-/// 드라이버 체인은 오프셋 파일 버전과 무관하게 하드코딩되어 있으므로,
-/// 어느 오프셋이 로드됐는지와 상관없이 이 이름 하나로 고정한다.
-const FIXED_OFFSET_NAME: &str = "v2";
+#[path = "../../driver/shared/ioctls.rs"]
+mod ioctls;
+use ioctls::{GetLocationResponse, DEVICE_NAME, IOCTL_GET_LOCATION};
 
 const STAGE_DRIVER_UNAVAILABLE: u8 = 0xFF;
 const STAGE_TARGET_MISSING: u8 = 0xFE;
-
-#[repr(C)]
-struct GetLocationResp {
-    x: f32,
-    y: f32,
-    z: f32,
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
-    /// 0=성공, 0xFF=헬퍼가 드라이버를 못 엶, 0xFE=대상 프로세스 없음, 그 외=포인터 체인 실패 단계
-    stage: u8,
-    _pad: [u8; 3],
-}
 
 pub struct WinProcDriver;
 
@@ -58,7 +49,7 @@ impl WinProcDriver {
     /// 하드코딩되어 있고, 이 앱은 런타임에 그것을 바꿀 방법이 없다.
     pub fn new(name: &str, _cache_dir: PathBuf, _scan_config: Option<GWorldScanConfig>) -> Result<Self> {
         // attach 버튼을 눌렀는데 게임이 아예 안 떠있으면 즉시 실패로 피드백한다.
-        // (이후의 좌표 조회는 헬퍼/드라이버가 매번 알아서 프로세스를 찾으므로 이 확인은
+        // (이후의 좌표 조회는 드라이버가 매번 알아서 프로세스를 찾으므로 이 확인은
         // 여기서 1회, "붙기 시도" 자체의 성공/실패 판정용으로만 쓰인다.)
         if find_pid_by_name(name).is_none() {
             bail!("게임이 실행 중이 아닙니다.");
@@ -68,41 +59,56 @@ impl WinProcDriver {
 }
 
 impl ProcessBackend for WinProcDriver {
-    /// 오프셋 인자는 "v2"가 로드되어 있는지 확인하는 용도로만 쓰인다.
-    /// 실제 포인터 체인 내용은 드라이버 내부에 하드코딩되어 있어 참조하지 않는다.
-    fn poll(&mut self, offsets: &[WuwaOffset]) -> Result<crate::types::PlayerInfo, NativeError> {
-        if !offsets.iter().any(|o| o.name == FIXED_OFFSET_NAME) {
-            return Err(NativeError::PointerChainError {
-                message: format!("오프셋 '{}'를 찾을 수 없습니다.", FIXED_OFFSET_NAME),
-            });
-        }
-        call_helper_get_location()
+    /// 오프셋 인자는 참조하지 않는다: 실제 포인터 체인 내용은 드라이버 내부에
+    /// 하드코딩되어 있다 (원격 오프셋 파일의 항목 이름/버전과는 무관 — 예전엔
+    /// 그 이름이 "v2"로 고정돼 있다고 가정하는 체크가 있었는데, 원격 파일의
+    /// 항목 이름이 게임 버전 문자열(예: "v3.4.0+")로 바뀌면서 항상 실패하게
+    /// 됐던 죽은 게이트였다. 드라이버 모드에선 이 값 자체가 필요 없으므로 제거).
+    fn poll(&mut self, _offsets: &[WuwaOffset]) -> Result<crate::types::PlayerInfo, NativeError> {
+        call_driver_get_location()
     }
 
     fn diagnostics(&self) -> String {
-        format!("helper:hardcoded-chain[{}]", FIXED_OFFSET_NAME)
+        "driver".to_string()
     }
 }
 
-// ── 헬퍼 IPC ─────────────────────────────────────────────────────────────────
+// ── 드라이버 IOCTL ───────────────────────────────────────────────────────────
 
-fn call_helper_get_location() -> Result<crate::types::PlayerInfo, NativeError> {
-    let pipe = open_helper_pipe()?;
-    let mut file = unsafe { <std::fs::File as std::os::windows::io::FromRawHandle>::from_raw_handle(pipe as _) };
+fn call_driver_get_location() -> Result<crate::types::PlayerInfo, NativeError> {
+    let device = open_driver()?;
 
-    if file.write_all(&REQ_GET_LOCATION.to_le_bytes()).is_err() {
-        return Err(NativeError::HelperUnavailable);
+    let mut resp = GetLocationResponse {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        pitch: 0.0,
+        yaw: 0.0,
+        roll: 0.0,
+        stage: 0,
+        _pad: [0; 3],
+    };
+    let mut returned: u32 = 0;
+
+    let ok = unsafe {
+        DeviceIoControl(
+            device,
+            IOCTL_GET_LOCATION,
+            std::ptr::null_mut(),
+            0,
+            &mut resp as *mut _ as *mut _,
+            mem::size_of::<GetLocationResponse>() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe { CloseHandle(device) };
+
+    if ok == 0 || returned as usize != mem::size_of::<GetLocationResponse>() {
+        return Err(NativeError::DriverUnavailable);
     }
 
-    let mut buf = [0u8; mem::size_of::<GetLocationResp>()];
-    if file.read_exact(&mut buf).is_err() {
-        return Err(NativeError::HelperUnavailable);
-    }
-    // file은 raw handle을 소유(drop 시 자동 CloseHandle)하므로 별도 정리가 필요 없다.
-
-    let resp = unsafe { &*(buf.as_ptr() as *const GetLocationResp) };
-
-    // 프로세스를 못 찾았다는 것만 "연결 해제"로 취급한다. 그 외(헬퍼/드라이버 불가,
+    // 프로세스를 못 찾았다는 것만 "연결 해제"로 취급한다. 그 외(드라이버 불가,
     // 포인터 체인 실패)는 프로세스는 여전히 붙어 있는 것으로 가정하는 일시적 오류다.
     if resp.stage == STAGE_TARGET_MISSING {
         return Err(NativeError::ProcessTerminated);
@@ -129,32 +135,29 @@ fn call_helper_get_location() -> Result<crate::types::PlayerInfo, NativeError> {
 /// 드라이버의 stage 코드는 `driver/src/main.rs`의 `read_player_world_position`
 /// 실패 지점과 1:1로 대응한다(포인터 체인 길이 6 기준):
 /// 1: 모듈 베이스/World Anchor 탐색 실패, 2~7: 포인터 체인 1~6단계 역참조 실패,
-/// 8: 최종 좌표(FRelativeTransform) 읽기 실패.
+/// 8: 최종 좌표(FTransform) 읽기 실패.
 fn describe_driver_stage(stage: u8) -> String {
     match stage {
         1 => "메인 모듈 베이스 또는 World Anchor 탐색 실패".to_string(),
         2..=7 => format!("포인터 체인 {}단계 역참조 실패", stage - 1),
-        8 => "좌표 트랜스폼(FRelativeTransform) 읽기 실패".to_string(),
+        8 => "좌표 트랜스폼(FTransform) 읽기 실패".to_string(),
         other => format!("드라이버 체인 실패 (알 수 없는 stage={})", other),
     }
 }
 
-/// 헬퍼의 named pipe를 연다. 헬퍼 프로세스가 없거나(ENOENT류), 접근이 거부된 경우
-/// (헬퍼가 이 앱 계정 외의 접근을 차단) 각각 다른 오류로 구분해 보고한다.
-fn open_helper_pipe() -> Result<HANDLE, NativeError> {
+/// `\\.\WumaDisplayService`를 연다. 드라이버가 단일 인스턴스 핸들만 허용하므로,
+/// 앱의 다른 인스턴스나 이전 호출의 핸들이 아직 열려 있으면 이 호출은
+/// ACCESS_DENIED로 실패한다 — 그 경우도 `DriverUnavailable`로 보고한다(앱 입장에서
+/// "드라이버 미로드"와 "이미 다른 핸들이 열려 있음"을 구분해도 사용자가 취할 수
+/// 있는 조치가 다르지 않다).
+fn open_driver() -> Result<winapi::um::winnt::HANDLE, NativeError> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
-    let path_w: Vec<u16> = OsStr::new(PIPE_NAME)
+    let path_w: Vec<u16> = OsStr::new(DEVICE_NAME)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-
-    // 헬퍼가 막 재시작 중이거나 이전 클라이언트를 처리 중일 수 있으므로 named pipe의
-    // 표준 대기 방식(WaitNamedPipeW)으로 짧게 재시도한다.
-    unsafe {
-        winapi::um::namedpipeapi::WaitNamedPipeW(path_w.as_ptr(), 200);
-    }
 
     let handle = unsafe {
         CreateFileW(
@@ -169,11 +172,7 @@ fn open_helper_pipe() -> Result<HANDLE, NativeError> {
     };
 
     if handle == INVALID_HANDLE_VALUE {
-        let err = std::io::Error::last_os_error();
-        return match err.raw_os_error() {
-            Some(5) => Err(NativeError::HelperUnauthorized), // ERROR_ACCESS_DENIED
-            _ => Err(NativeError::HelperUnavailable),
-        };
+        return Err(NativeError::DriverUnavailable);
     }
 
     Ok(handle)

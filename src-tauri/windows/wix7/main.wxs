@@ -78,6 +78,23 @@
                 <File Id="Path" Source="$(var.MainBinaryPath)" KeyPath="yes" Checksum="yes" />
             </Component>
 
+            <!-- WumaDisplayService: non-PnP kernel service driver (see
+                 driver/AGENTS.md). This .sys must already be Authenticode-signed
+                 (build-and-sign.ps1) before packaging — the msi build only
+                 copies it in, it never builds/signs the driver itself.
+
+                 ServiceInstall/ServiceControl are NOT used here: the Windows
+                 Installer engine itself has never supported the ServiceInstall
+                 Type="kernelDriver"/"systemDriver" values (WIX0073 — confirmed
+                 against this WiX v7 build, not a WiX-side restriction), only
+                 ownProcess/shareProcess Win32 services. Kernel/legacy driver
+                 services have to be registered the same way
+                 driver/scripts/install-driver.ps1 does it: via `sc.exe`,
+                 wired up below as custom actions. -->
+            <Component Id="DriverSys" Guid="9f2c6d7e-1a4b-4c3d-8e5f-7b6a9c0d1e2f">
+                <File Id="DriverSys" Source="$(var.DriverSysPath)" KeyPath="yes" Checksum="yes" />
+            </Component>
+
             <Component Id="CMP_UninstallShortcut">
                 <Shortcut Id="UninstallShortcut"
                           Name="명조 맵스 트래커 삭제"
@@ -121,6 +138,10 @@
                 <ComponentRef Id="ApplicationShortcutDesktop" />
             </Feature>
 
+            <Feature Id="DriverFeature" Title="Player Position Driver" Level="1" AllowAdvertise="no" AllowAbsent="no">
+                <ComponentRef Id="DriverSys" />
+            </Feature>
+
             <Feature Id="Environment" Title="PATH Environment Variable" Description="!(loc.PathEnvVarFeature)" Level="1">
                 <ComponentRef Id="Path" />
             </Feature>
@@ -133,6 +154,109 @@
             <RegistrySearch Id="WVRTInstalledSystem" Root="HKLM" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" Bitness="always32" />
             <RegistrySearch Id="WVRTInstalledUser" Root="HKCU" Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" Name="pv" Type="raw" />
         </Property>
+
+        <!-- The app runs elevated and normally sits in the tray the whole
+             time, so a reinstall/upgrade/repair/uninstall while it's still
+             running is the common case, not an edge case. A still-running
+             app locks its own .exe (breaking InstallFiles/RemoveFiles on the
+             Path component below) and can re-open a handle to the driver
+             device at any moment (racing the stop/delete/create sequence
+             further down). A simple unconditional Stop-Process, scheduled
+             as early as possible (right after CostFinalize, before anything
+             else in this file) and for every scenario (no REMOVE/NOT REMOVE
+             condition — install, upgrade, repair, and uninstall all need
+             this equally), sidesteps that entirely instead of trying to
+             chase precise ordering against file/service actions.
+
+             (WiX's util:CloseApplication was considered instead, but its
+             auto-scheduled position landed AFTER RemoveFiles/
+             UnregisterDriverServiceDeferred in the uninstall sequence when
+             actually tested — verified via `wix build` + querying the
+             compiled MSI's InstallExecuteSequence table — so on uninstall it
+             would close the app too late to help. Its action ID is also
+             architecture-suffixed (Wix4CloseApplications_X64/_X86/...),
+             making it awkward to re-sequence explicitly across the
+             x64/x86/arm64 builds this project produces. A plain
+             Stop-Process custom action avoids both problems.) -->
+        <CustomAction Id="CloseAppDeferred"
+                      Directory="INSTALLDIR"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore"
+                      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;Stop-Process -Name wuma-tracker -Force -ErrorAction SilentlyContinue&quot;" />
+
+        <!-- WumaDisplayService register/start (install/upgrade) and
+             stop/unregister (uninstall/upgrade-removal), via sc.exe — see the
+             comment on the DriverSys component for why this isn't
+             ServiceInstall/ServiceControl.
+
+             [#DriverSys] (the installed .sys path) is only resolvable while
+             formatting is still allowed, i.e. from an *immediate* custom
+             action; deferred custom actions run out-of-process as SYSTEM
+             with formatting locked down to prevent property injection, and
+             can only see the single literal token [CustomActionData]. So an
+             immediate CustomAction captures the formatted sc.exe command
+             line into a property NAMED AFTER the deferred action it feeds
+             (that's how MSI decides which property to copy into
+             CustomActionData for a given deferred action) — this is the
+             standard MSI two-step pattern for passing dynamic data into a
+             deferred custom action.
+
+             RegisterDriverServiceDeferred self-heals regardless of *why* the
+             service might already be registered: it first checks whether
+             WumaDisplayService exists at all and, if so, stops + deletes +
+             waits for it to be fully gone (mirroring install-driver.ps1's own
+             stop/delete/poll sequence) before creating it fresh. This covers
+             two distinct cases with one code path:
+               1. A same-version REINSTALL/repair (REINSTALLMODE=amus, set at
+                  the top of this file) — MajorUpgrade/RemoveExistingProducts
+                  never runs for this, REMOVE is never set, so
+                  UnregisterDriverServiceDeferred below never fires, and the
+                  service is still actively registered when this action runs.
+                  Without the upfront stop+delete here, `sc create` would
+                  fail with 1073 (service already exists) — NOT 1072 — which
+                  the retry loop below does not retry, failing the whole
+                  install.
+               2. A real major upgrade, where RemoveExistingProducts already
+                  deleted the old registration moments ago but the SCM may
+                  not have finished tearing it down yet — `sc create` can
+                  transiently fail with 1072 until that completes, which the
+                  retry loop below does handle. -->
+        <CustomAction Id="SetRegisterDriverServiceDeferred"
+                      Property="RegisterDriverServiceDeferred"
+                      Value="[#DriverSys]" />
+        <CustomAction Id="RegisterDriverServiceDeferred"
+                      Directory="INSTALLDIR"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="check"
+                      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;$ErrorActionPreference='Stop'; sc.exe query WumaDisplayService | Out-Null; if ($LASTEXITCODE -eq 0) { sc.exe stop WumaDisplayService | Out-Null; for ($i = 0; $i -lt 20; $i++) { $s = (sc.exe query WumaDisplayService 2&gt;$null) -join ' '; if ($s -match 'STOPPED') { break }; Start-Sleep -Milliseconds 500 }; sc.exe delete WumaDisplayService | Out-Null; for ($i = 0; $i -lt 10; $i++) { sc.exe query WumaDisplayService 2&gt;$null | Out-Null; if ($LASTEXITCODE -ne 0) { break }; Start-Sleep -Milliseconds 500 } }; for ($i = 0; $i -lt 10; $i++) { sc.exe create WumaDisplayService type= kernel start= demand error= normal binPath= '[CustomActionData]' | Out-Null; if ($LASTEXITCODE -eq 0) { break }; if ($LASTEXITCODE -ne 1072) { exit $LASTEXITCODE }; Start-Sleep -Milliseconds 500 }; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; sc.exe start WumaDisplayService | Out-Null; exit 0&quot;" />
+
+        <CustomAction Id="UnregisterDriverServiceDeferred"
+                      Directory="INSTALLDIR"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore"
+                      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;sc.exe stop WumaDisplayService | Out-Null; Start-Sleep -Milliseconds 500; sc.exe delete WumaDisplayService | Out-Null&quot;" />
+
+        <InstallExecuteSequence>
+            <!-- Unconditional — runs for install, upgrade, repair, AND
+                 uninstall alike, before anything else touches app files or
+                 the driver service. -->
+            <Custom Action="CloseAppDeferred" After="CostFinalize" />
+            <!-- Formats [#DriverSys] while formatting is still allowed, before
+                 InstallFinalize's deferred actions run. -->
+            <Custom Action="SetRegisterDriverServiceDeferred" After="CloseAppDeferred" Condition="NOT REMOVE" />
+            <!-- After InstallFiles so the .sys is actually on disk when sc.exe
+                 create's binPath is validated/started. -->
+            <Custom Action="RegisterDriverServiceDeferred" After="InstallFiles" Condition="NOT REMOVE" />
+            <!-- Before RemoveFiles so the driver is unloaded (not holding the
+                 .sys open) before the file itself gets deleted. Runs for a
+                 real uninstall and for the old product's half of a major
+                 upgrade alike — the new product's RegisterDriverServiceDeferred
+                 above re-creates it either way. -->
+            <Custom Action="UnregisterDriverServiceDeferred" Before="RemoveFiles" Condition="REMOVE" />
+        </InstallExecuteSequence>
 
         <CustomAction Id="DownloadAndInvokeBootstrapper" Directory="INSTALLDIR" Execute="deferred" ExeCommand="powershell.exe -NoProfile -windowstyle hidden try [\{] [\[]Net.ServicePointManager[\]]::SecurityProtocol = [\[]Net.SecurityProtocolType[\]]::Tls12 [\}] catch [\{][\}]; Invoke-WebRequest -Uri &quot;https://go.microsoft.com/fwlink/p/?LinkId=2124703&quot; -OutFile &quot;$env:TEMP\MicrosoftEdgeWebview2Setup.exe&quot; ; Start-Process -FilePath &quot;$env:TEMP\MicrosoftEdgeWebview2Setup.exe&quot; -ArgumentList ('/silent', '/install') -Wait" Return="check" />
         <InstallExecuteSequence>

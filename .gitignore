@@ -18,7 +18,9 @@ msix_staging
 
 # 드라이버 빌드 아티팩트
 /driver/target/
-/driver/helper/target
+# makecab.exe가 driver/에서 실행될 때 남기는 로그 (prepare-attestation-package.ps1)
+/driver/setup.inf
+/driver/setup.rpt
 
 # MSI 빌드 아티팩트 (build-msi.ps1 / sign-msi.ps1)
 /dist/

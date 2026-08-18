@@ -5,8 +5,6 @@ use crate::process_backend::ProcessBackend;
 use crate::types::{CollectorMessage, NativeError};
 #[cfg(windows)]
 use crate::win_proc_driver::WinProcDriver as PlatformProc;
-// ↑ 드라이버 없이 기존 ReadProcessMemory 방식으로 되돌리려면 위 줄을 아래로 변경:
-// use crate::win_proc::WinProc as PlatformProc;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("Native process tracking is supported only on Windows and macOS.");
@@ -112,7 +110,7 @@ pub async fn collection_loop(
                 log::info!("Collection loop exiting: exit signal received");
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
 }

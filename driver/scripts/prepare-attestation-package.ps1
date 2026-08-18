@@ -10,8 +10,12 @@
     INF+CAT+driver bundle in a single signed CAB, so this script:
 
       1. Stages the already-built, already-Authenticode-signed .sys
-         (run build-and-sign.ps1 first) together with the fake INF in
-         driver/attestation/WumaDisplayService.inf.
+         (run build-and-sign.ps1 first) together with its .pdb and the fake
+         INF in driver/attestation/WumaDisplayService.inf. Per Microsoft's
+         attestation-signing docs, the .pdb is a required part of the driver
+         folder inside the CAB (not a separate upload) — it's what Microsoft's
+         automated crash analysis tooling uses if this driver ever bugchecks
+         on a user's machine.
       2. Runs InfVerif.exe against the staged INF and fails loudly on any
          error (per Microsoft's guidance, this is expected to be iterative —
          fix the INF and re-run until it's clean).
@@ -30,7 +34,7 @@
     IMPORTANT: the certificate used to sign the CAB must be an EV code-signing
     certificate registered on the Partner Center Hardware Dashboard account.
     That may be a different certificate from the OV cert build-and-sign.ps1
-    uses for day-to-day driver/helper signing — verify before submitting.
+    uses for day-to-day driver signing — verify before submitting.
 
 .PARAMETER EwdkRoot
     Path to an extracted/mounted EWDK image (used to locate InfVerif.exe and
@@ -39,6 +43,10 @@
 .PARAMETER SysPath
     Path to the already-built, already-signed driver .sys. Defaults to
     build-and-sign.ps1's output location.
+
+.PARAMETER PdbPath
+    Path to the driver's .pdb. Defaults to cargo's release output location
+    for the driver crate.
 
 .PARAMETER OutDir
     Directory the staged INF/CAT/CAB are written to.
@@ -68,6 +76,7 @@
 param(
     [string]$EwdkRoot = "A:\EWDK",
     [string]$SysPath,
+    [string]$PdbPath,
     [string]$OutDir,
     [string]$OsList = "10_X64",
     [string]$CertThumbprint,
@@ -83,6 +92,9 @@ $InfSource = Join-Path $AttestationDir "WumaDisplayService.inf"
 if (-not $SysPath) {
     $SysPath = Join-Path $DriverDir "target\WumaDisplayService.sys"
 }
+if (-not $PdbPath) {
+    $PdbPath = Join-Path $DriverDir "target\x86_64-pc-windows-msvc\release\wuma_tracker_driver.pdb"
+}
 if (-not $OutDir) {
     $OutDir = Join-Path $DriverDir "target\attestation"
 }
@@ -94,6 +106,9 @@ function Fail($msg) {
 
 if (-not (Test-Path $SysPath)) {
     Fail "서명된 드라이버를 찾지 못했습니다: $SysPath (먼저 build-and-sign.ps1 실행)"
+}
+if (-not (Test-Path $PdbPath)) {
+    Fail "심볼 파일을 찾지 못했습니다: $PdbPath (먼저 build-and-sign.ps1 실행)"
 }
 if (-not (Test-Path $InfSource)) {
     Fail "INF를 찾지 못했습니다: $InfSource"
@@ -110,6 +125,7 @@ if (Test-Path $StageDir) {
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
 Copy-Item $SysPath (Join-Path $StageDir "WumaDisplayService.sys") -Force
+Copy-Item $PdbPath (Join-Path $StageDir "WumaDisplayService.pdb") -Force
 Copy-Item $InfSource (Join-Path $StageDir "WumaDisplayService.inf") -Force
 
 # ── 1. 도구 탐색 (EWDK 버전에 안 묶이도록 트리에서 직접 찾는다) ──────────────────
@@ -166,13 +182,19 @@ Write-Host "[4/5] CAB 패키징 중..." -ForegroundColor Cyan
 $cabPath = Join-Path $OutDir "WumaDisplayService.cab"
 $ddfPath = Join-Path $OutDir "WumaDisplayService.ddf"
 
+# Partner Center's package validation rejects a CAB with files directly at
+# its root ("There are files at the root of the cabinet: ...") — driver
+# package files must be isolated under a subdirectory. DestinationDir nests
+# everything under WumaDisplayService\ inside the CAB.
 @"
 .OPTION EXPLICIT
 .Set CabinetNameTemplate=WumaDisplayService.cab
 .Set DiskDirectory1=$OutDir
 .Set Cabinet=on
 .Set Compress=on
+.Set DestinationDir=WumaDisplayService
 "$StageDir\WumaDisplayService.sys"
+"$StageDir\WumaDisplayService.pdb"
 "$StageDir\WumaDisplayService.inf"
 "$StageDir\WumaDisplayService.cat"
 "@ | Set-Content -Path $ddfPath -Encoding ASCII

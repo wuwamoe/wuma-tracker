@@ -16,8 +16,8 @@ mod ioctls;
 use wdk_sys::{
     ntddk::{
         ExAllocatePool2, ExFreePoolWithTag, IoCreateSymbolicLink, IoDeleteDevice,
-        IoDeleteSymbolicLink, IofCompleteRequest, ObDereferenceObjectDeferDelete,
-        PsLookupProcessByProcessId,
+        IoDeleteSymbolicLink, IoGetCurrentProcess, IofCompleteRequest,
+        ObDereferenceObjectDeferDelete, PsGetCurrentProcessId, PsLookupProcessByProcessId,
     },
     DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, FILE_DEVICE_UNKNOWN, HANDLE, NTSTATUS,
     PDEVICE_OBJECT, PEPROCESS, PIRP, PUNICODE_STRING, PVOID, SIZE_T, ULONG, ULONG64, ULONG_PTR,
@@ -43,6 +43,7 @@ static WUMATRACKER_PURPOSE: &str = "WumaTracker Player Position Service; reads o
 
 const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
+const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
 const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 const STATUS_NOT_FOUND: NTSTATUS = 0xC000_0225u32 as i32;
@@ -77,6 +78,14 @@ const IRP_CURRENT_STACK: usize = 0xB8;
 const STACK_OUT_LEN: usize = 0x08;
 const STACK_IN_LEN: usize = 0x10;
 const STACK_IOCTL_CODE: usize = 0x18;
+// IO_STACK_LOCATION.FileObject @0x30 (right after the 0x20-byte Parameters
+// union that starts at +0x08, and the 8-byte DeviceObject field after it);
+// FILE_OBJECT.FsContext @0x18. Both verified by hand against km\wdm.h and
+// cross-checked against bindgen's real (test-only) sizeof for
+// _IO_STACK_LOCATION (72 bytes: FileObject is the second-to-last of four
+// trailing 8-byte pointer fields, hence 72-24=0x30).
+const STACK_FILE_OBJECT: usize = 0x30;
+const FILE_OBJECT_FSCONTEXT: usize = 0x18;
 
 // Verified by hand against km\wdm.h (WDK 10.0.28000.0, x64): struct
 // _DEVICE_OBJECT.Flags @0x30; struct _DRIVER_OBJECT.DeviceObject @0x08,
@@ -86,7 +95,37 @@ const DRV_DEVICE_OBJECT: usize = 0x08;
 const DRV_UNLOAD: usize = 0x68;
 const DRV_MAJOR_FUNCTION: usize = 0x70;
 
-use ioctls::IOCTL_GET_LOCATION;
+use ioctls::{IOCTL_GET_LOCATION, APP_PROCESS_NAME};
+
+/// Converts an ASCII `&str` to a fixed-size byte prefix at compile time, so
+/// `APP_NAME_PREFIX` below is generated from `ioctls::APP_PROCESS_NAME`
+/// instead of being a second, independently-maintained copy of the app name.
+const fn ascii_prefix<const N: usize>(s: &str) -> [u8; N] {
+    let bytes = s.as_bytes();
+    let mut out = [0u8; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = bytes[i];
+        i += 1;
+    }
+    out
+}
+// First 14 bytes of "wuma-tracker.exe" — same truncated-name-buffer caveat as
+// CACHED_NAME_PREFIX below (EPROCESS::ImageFileName is UCHAR[15], and this
+// name is 16 chars, one over the buffer, so it is never NUL-terminated in
+// that buffer; comparing a 14-byte prefix avoids relying on a terminator that
+// isn't there). This is friction against incidental misuse only, checked at
+// IRP_MJ_CREATE — not an identity guarantee. See
+// driver/docs/DIRECT-ACCESS-PLAN.md.
+const APP_NAME_PREFIX: [u8; 14] = ascii_prefix(APP_PROCESS_NAME);
+
+// Single-instance + handle/PID binding: only one process may hold the device
+// open at a time (0 = no owner), and every IOCTL on that handle must come
+// from the same PID that opened it (see dispatch_create/dispatch_close and
+// the check in dispatch_ioctl). Neither of these authenticates the caller —
+// they only add friction against incidental misuse and handle-duplication
+// tricks; the device SDDL remains the real access-control boundary.
+static DEVICE_OWNER_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 const USER_MIN: u64 = 0x1_0000;
 const USER_MAX: u64 = 0x7FFF_FFFF_FFFF;
@@ -114,10 +153,19 @@ struct PlayerCoordConfig {
     add_world_origin: bool,
 }
 
+// v3.4.0+ offsets: GWorld -> OwningGameInstance(+440) -> LocalPlayers[0]
+// (TArray data +64, element 0 +0) -> PlayerController(+56) ->
+// AcknowledgedPawn(+832) -> RootComponent(+416) -> ComponentToWorld(+480, a
+// full FTransform read directly, not another pointer dereference).
 static PLAYER_COORD_CONFIG: PlayerCoordConfig = PlayerCoordConfig {
-    chain: [0x180, 0x38, 0, 0x30, 0x2A0, 0x130],
-    relative_location_offset: 0x11C,
-    add_world_origin: false,
+    chain: [440, 64, 0, 56, 832, 416],
+    relative_location_offset: 480,
+    // ComponentToWorld.Translation is relative to UWorld's current local
+    // origin, which UE re-bases near the player as they travel far from
+    // (0,0,0) for float precision (World Origin Rebasing) — without adding
+    // PersistentLevel->OriginLocation back in, coordinates silently collapse
+    // to near-zero right after a rebase even though the player hasn't moved.
+    add_world_origin: true,
 };
 
 #[repr(C)]
@@ -224,26 +272,6 @@ struct FIntVector {
     z: i32,
 }
 
-#[repr(C)]
-struct FVector {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-#[repr(C)]
-struct FRotator {
-    pitch: f32,
-    yaw: f32,
-    roll: f32,
-}
-
-#[repr(C)]
-struct FRelativeTransform {
-    location: FVector,
-    rotation: FRotator,
-}
-
 #[inline]
 fn is_valid_ptr(addr: u64) -> bool {
     addr >= USER_MIN && addr <= USER_MAX
@@ -293,8 +321,8 @@ pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> 
     *flags = (*flags | DO_BUFFERED_IO) & !DO_DEVICE_INITIALIZING;
 
     let mf = drv.add(DRV_MAJOR_FUNCTION) as *mut usize;
-    *mf.add(0) = dispatch_ok as *const () as usize;
-    *mf.add(2) = dispatch_ok as *const () as usize;
+    *mf.add(0) = dispatch_create as *const () as usize;
+    *mf.add(2) = dispatch_close as *const () as usize;
     *mf.add(14) = dispatch_ioctl as *const () as usize;
     *(drv.add(DRV_UNLOAD) as *mut usize) = unload as *const () as usize;
 
@@ -310,7 +338,58 @@ unsafe extern "system" fn unload(drv: *mut u8) {
     }
 }
 
-unsafe extern "system" fn dispatch_ok(_: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+/// Truncated-name check against `APP_NAME_PREFIX` — friction against
+/// incidental misuse only, not an identity guarantee (any binary can be
+/// renamed to match). See `driver/docs/DIRECT-ACCESS-PLAN.md`.
+unsafe fn caller_is_app() -> bool {
+    let proc = IoGetCurrentProcess();
+    let name_ptr = PsGetProcessImageFileName(proc);
+    !name_ptr.is_null()
+        && core::slice::from_raw_parts(name_ptr, APP_NAME_PREFIX.len()) == &APP_NAME_PREFIX[..]
+}
+
+/// Enforces single-instance (only one process may hold the device open) and
+/// records the opening PID into the file object's FsContext, so
+/// dispatch_ioctl can bind every subsequent call on this handle back to the
+/// same process. Neither check authenticates the caller (see
+/// `driver/docs/DIRECT-ACCESS-PLAN.md`) — the device SDDL remains the real
+/// access-control boundary; this only adds cheap friction on top of it.
+unsafe extern "system" fn dispatch_create(_: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    if !caller_is_app() {
+        return complete(irp, STATUS_ACCESS_DENIED, 0);
+    }
+
+    let pid = PsGetCurrentProcessId() as u64;
+    if DEVICE_OWNER_PID
+        .compare_exchange(
+            0,
+            pid,
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return complete(irp, STATUS_ACCESS_DENIED, 0);
+    }
+
+    let b = irp as *mut u8;
+    let stack = *(b.add(IRP_CURRENT_STACK) as *mut *mut u8);
+    let file_object = *(stack.add(STACK_FILE_OBJECT) as *mut *mut u8);
+    if file_object.is_null() {
+        // Without a FILE_OBJECT there is nowhere to record the owning PID,
+        // so dispatch_ioctl's PID-binding check could never succeed on this
+        // handle — release the ownership claimed above instead of leaving it
+        // stuck on a handle that can never actually be used.
+        DEVICE_OWNER_PID.store(0, core::sync::atomic::Ordering::SeqCst);
+        return complete(irp, STATUS_ACCESS_DENIED, 0);
+    }
+    *(file_object.add(FILE_OBJECT_FSCONTEXT) as *mut usize) = pid as usize;
+
+    complete(irp, STATUS_SUCCESS, 0)
+}
+
+unsafe extern "system" fn dispatch_close(_: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    DEVICE_OWNER_PID.store(0, core::sync::atomic::Ordering::SeqCst);
     complete(irp, STATUS_SUCCESS, 0)
 }
 
@@ -322,9 +401,24 @@ unsafe extern "system" fn dispatch_ioctl(_: PDEVICE_OBJECT, irp: PIRP) -> NTSTAT
     let ilen = *(stack.add(STACK_IN_LEN) as *const u32) as usize;
     let olen = *(stack.add(STACK_OUT_LEN) as *const u32) as usize;
 
-    let (s, n) = match code {
-        IOCTL_GET_LOCATION => on_get_location(buf, ilen, olen),
-        _ => (STATUS_INVALID_PARAMETER, 0),
+    // Handle/PID binding: the handle this IOCTL arrived on must still belong
+    // to the same process that opened it (defends against handle-duplication
+    // tricks; see dispatch_create).
+    let file_object = *(stack.add(STACK_FILE_OBJECT) as *mut *mut u8);
+    let bound_pid = if file_object.is_null() {
+        0usize
+    } else {
+        *(file_object.add(FILE_OBJECT_FSCONTEXT) as *const usize)
+    };
+    let current_pid = PsGetCurrentProcessId() as usize;
+
+    let (s, n) = if bound_pid == 0 || bound_pid != current_pid {
+        (STATUS_ACCESS_DENIED, 0)
+    } else {
+        match code {
+            IOCTL_GET_LOCATION => on_get_location(buf, ilen, olen),
+            _ => (STATUS_INVALID_PARAMETER, 0),
+        }
     };
     complete(irp, s, n)
 }
@@ -337,18 +431,47 @@ unsafe fn complete(irp: PIRP, status: NTSTATUS, info: usize) -> NTSTATUS {
     status
 }
 
-unsafe fn kread(proc: PEPROCESS, addr: u64, out: *mut u8, len: usize) -> bool {
-    // KAPC_STATE is made up of pointer-sized/LIST_ENTRY fields that the
-    // kernel's attach/detach routines assume are naturally aligned. A plain
-    // `[u8; N]` only guarantees 1-byte alignment, so on an unlucky stack
-    // layout KeStackAttachProcess's internal bookkeeping can end up
-    // corrupted, silently failing to actually attach — every subsequent
-    // MmCopyMemory then runs in the *caller's* address space instead of the
-    // target's, failing regardless of how correct `addr` is.
-    #[repr(C, align(16))]
-    struct ApcState([u8; 72]);
-    let mut apc = ApcState([0u8; 72]);
-    KeStackAttachProcess(proc, apc.0.as_mut_ptr());
+// KAPC_STATE is made up of pointer-sized/LIST_ENTRY fields that the kernel's
+// attach/detach routines assume are naturally aligned. A plain `[u8; N]` only
+// guarantees 1-byte alignment, so on an unlucky stack layout
+// KeStackAttachProcess's internal bookkeeping can end up corrupted, silently
+// failing to actually attach — every subsequent MmCopyMemory then runs in the
+// *caller's* address space instead of the target's, failing regardless of how
+// correct `addr` is.
+#[repr(C, align(16))]
+struct ApcState([u8; 72]);
+
+/// RAII guard around KeStackAttachProcess/KeUnstackDetachProcess so one
+/// attach can span multiple raw reads (`kread_raw`/`kread_ptr_raw`) instead of
+/// paying a separate attach/detach per field — attach/detach switches the
+/// thread's page-table base, real cost per call, unlike the app-driver device
+/// handle (open/closed per poll; negligible by comparison). Always detaches
+/// on drop, including through every `?` early-return in
+/// `read_player_world_position`.
+struct AttachGuard {
+    apc: ApcState,
+}
+
+impl AttachGuard {
+    unsafe fn new(proc: PEPROCESS) -> Self {
+        let mut apc = ApcState([0u8; 72]);
+        KeStackAttachProcess(proc, apc.0.as_mut_ptr());
+        Self { apc }
+    }
+}
+
+impl Drop for AttachGuard {
+    fn drop(&mut self) {
+        unsafe {
+            KeUnstackDetachProcess(self.apc.0.as_mut_ptr());
+        }
+    }
+}
+
+/// Copies `len` bytes from `addr` in whatever process the caller is currently
+/// attached to via `AttachGuard`. Does not attach/detach itself — see `kread`
+/// for the one-shot (attaches for just this call) equivalent.
+unsafe fn kread_raw(addr: u64, out: *mut u8, len: usize) -> bool {
     let mut copied: SIZE_T = 0;
     let s = MmCopyMemory(
         out as PVOID,
@@ -357,8 +480,27 @@ unsafe fn kread(proc: PEPROCESS, addr: u64, out: *mut u8, len: usize) -> bool {
         MM_COPY_MEMORY_VIRTUAL,
         &mut copied,
     );
-    KeUnstackDetachProcess(apc.0.as_mut_ptr());
     s == STATUS_SUCCESS && copied == len as SIZE_T
+}
+
+unsafe fn kread_ptr_raw(addr: u64) -> Option<u64> {
+    if !is_valid_ptr(addr) {
+        return None;
+    }
+    let mut v = 0u64;
+    if kread_raw(addr, &mut v as *mut _ as *mut u8, 8) && is_valid_ptr(v) {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// One-shot read: attaches just for this single call. Used by call sites
+/// that aren't in the per-poll hot path (world-anchor resolution/pattern
+/// scan), where a separate attach per call doesn't matter.
+unsafe fn kread(proc: PEPROCESS, addr: u64, out: *mut u8, len: usize) -> bool {
+    let _guard = AttachGuard::new(proc);
+    kread_raw(addr, out, len)
 }
 
 unsafe fn kread_ptr(proc: PEPROCESS, addr: u64) -> Option<u64> {
@@ -393,23 +535,25 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
         _pad: [0; 3],
     };
 
-    let proc = match find_target_process_cached() {
-        Ok(proc) => proc,
-        Err(dbg) => {
-            // Bit-exact (not lossy-cast) so the real i32/u32 values survive
-            // the f32 field round-trip for inspection without a debugger.
-            r.x = f32::from_bits(dbg.status as u32);
-            r.y = f32::from_bits(dbg.actual_len);
-            r.z = f32::from_bits(dbg.first_next_entry_offset);
-            r.pitch = f32::from_bits(dbg.seen);
-            r.yaw = f32::from_bits(dbg.first_dword_after_call);
-            r.stage = 0xFE;
-            return (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>());
-        }
+    let Some(proc) = find_target_process_cached() else {
+        r.stage = 0xFE;
+        return (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>());
     };
 
     let result = read_player_world_position(proc);
     ObDereferenceObjectDeferDelete(proc as PVOID);
+
+    // A cache hit only re-validates the PID lookup + truncated image name,
+    // which can keep "succeeding" for a short-lived zombie EPROCESS after the
+    // real process has already exited (module base/section already torn
+    // down). Without this, a stage-1 failure on a cache hit would just repeat
+    // forever instead of ever falling back to a full process-list rescan.
+    // Both caches are cleared so a genuinely new process also gets a fresh
+    // world-anchor scan rather than reusing an RVA from the dead instance.
+    if result == Err(1) {
+        CACHED_PID.store(0, core::sync::atomic::Ordering::Relaxed);
+        CACHED_WORLD_ANCHOR_RVA.store(0, core::sync::atomic::Ordering::Relaxed);
+    }
 
     match result {
         Ok((x, y, z, p, yw, rl)) => {
@@ -458,23 +602,6 @@ const SPI_UNIQUE_PROCESS_ID: usize = 0x50;
 /// (confirmed via `dumpbin /exports`), so relying on it would silently
 /// prevent the target process from ever being found on such builds. This
 /// matches the documented approach the driver plan calls for.
-/// Temporary rich diagnostics for find_target_process's failure path,
-/// surfaced bit-exact (via f32::from_bits, not a lossy numeric cast) through
-/// the response's x/y/z/pitch fields so it can be inspected without a kernel
-/// debugger attached. Remove once process lookup is confirmed working.
-#[derive(Clone, Copy)]
-struct FindProcessDebug {
-    status: NTSTATUS,
-    actual_len: u32,
-    first_next_entry_offset: u32,
-    seen: u32,
-    /// buf's first dword right after the ZwQuerySystemInformation call.
-    /// Compared against the 0xCAFEBABE canary written just before the call:
-    /// if it's still 0xCAFEBABE, the call never actually wrote to the
-    /// buffer at all.
-    first_dword_after_call: u32,
-}
-
 // Across-call caches so a live overlay polling this IOCTL doesn't redo a
 // full ZwQuerySystemInformation process-list scan and a world-anchor byte-pattern
 // scan (up to 512KB read from the target) on every single request. Both are
@@ -517,12 +644,12 @@ unsafe fn try_cached_process() -> Option<PEPROCESS> {
 /// Cache-aware wrapper around `find_target_process`: tries the cached PID
 /// first, only falling back to the full process-list scan on a cache miss
 /// or a stale/invalid cached PID, and refreshes the cache on a fresh scan.
-unsafe fn find_target_process_cached() -> Result<PEPROCESS, FindProcessDebug> {
+unsafe fn find_target_process_cached() -> Option<PEPROCESS> {
     if let Some(proc) = try_cached_process() {
-        return Ok(proc);
+        return Some(proc);
     }
     let result = find_target_process();
-    if let Ok(proc) = result {
+    if let Some(proc) = result {
         CACHED_PID.store(
             PsGetProcessId(proc) as u64,
             core::sync::atomic::Ordering::Relaxed,
@@ -548,44 +675,27 @@ unsafe fn resolve_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
     Some(anchor)
 }
 
-unsafe fn find_target_process() -> Result<PEPROCESS, FindProcessDebug> {
+unsafe fn find_target_process() -> Option<PEPROCESS> {
     let mut buf_len: u32 = 64 * 1024;
     let mut buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, buf_len as SIZE_T, POOL_TAG) as *mut u8;
     if buf.is_null() {
-        return Err(FindProcessDebug {
-            status: -1,
-            actual_len: 0,
-            first_next_entry_offset: 0,
-            seen: 0,
-            first_dword_after_call: 0,
-        });
+        return None;
     }
 
-    // Canaries to tell "the call never touched these" apart from "the call
-    // legitimately wrote zero": if these come back unchanged, the call site
-    // isn't actually reaching the real routine at all.
-    let mut actual_len: u32 = 0xDEAD_BEEF;
-    *(buf as *mut u32) = 0xCAFE_BABE;
+    let mut actual_len: u32 = 0;
     let mut status = ZwQuerySystemInformation(
         SYSTEM_PROCESS_INFORMATION_CLASS,
         buf as PVOID,
         buf_len,
         &mut actual_len,
     );
-    let first_dword_after_call = *(buf as *const u32);
     let mut retries = 0;
     while status == STATUS_INFO_LENGTH_MISMATCH && retries < 8 {
         ExFreePoolWithTag(buf as PVOID, POOL_TAG);
         buf_len = actual_len.saturating_add(4096);
         buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, buf_len as SIZE_T, POOL_TAG) as *mut u8;
         if buf.is_null() {
-            return Err(FindProcessDebug {
-                status: -2,
-                actual_len,
-                first_next_entry_offset: 0,
-                seen: 0,
-                first_dword_after_call: 0,
-            });
+            return None;
         }
         status = ZwQuerySystemInformation(
             SYSTEM_PROCESS_INFORMATION_CLASS,
@@ -598,31 +708,28 @@ unsafe fn find_target_process() -> Result<PEPROCESS, FindProcessDebug> {
 
     if status != STATUS_SUCCESS {
         ExFreePoolWithTag(buf as PVOID, POOL_TAG);
-        return Err(FindProcessDebug {
-            status,
-            actual_len,
-            first_next_entry_offset: 0,
-            seen: 0,
-            first_dword_after_call,
-        });
+        return None;
     }
 
-    let first_next_entry_offset = *(buf.add(SPI_NEXT_ENTRY_OFFSET) as *const u32);
-
-    let mut seen = 0u32;
     let mut offset = 0usize;
     let mut matched_pid: Option<HANDLE> = None;
+    // Covers the highest field this loop reads per record
+    // (SPI_UNIQUE_PROCESS_ID + size_of::<HANDLE>()). ZwQuerySystemInformation
+    // is kernel-produced, well-formed data in practice, but this bounds the
+    // walk to the actual allocation regardless, rather than trusting
+    // NextEntryOffset chains unconditionally.
+    const SPI_MIN_RECORD_SIZE: usize = SPI_UNIQUE_PROCESS_ID + 8;
     loop {
+        if offset + SPI_MIN_RECORD_SIZE > buf_len as usize {
+            break;
+        }
         let entry = buf.add(offset);
         let next_entry_offset = *(entry.add(SPI_NEXT_ENTRY_OFFSET) as *const u32);
         let image_name = &*(entry.add(SPI_IMAGE_NAME) as *const UNICODE_STRING);
 
-        if !image_name.Buffer.is_null() {
-            seen = seen.wrapping_add(1);
-            if unicode_path_ends_with_target(image_name) {
-                matched_pid = Some(*(entry.add(SPI_UNIQUE_PROCESS_ID) as *const HANDLE));
-                break;
-            }
+        if !image_name.Buffer.is_null() && unicode_path_ends_with_target(image_name) {
+            matched_pid = Some(*(entry.add(SPI_UNIQUE_PROCESS_ID) as *const HANDLE));
+            break;
         }
 
         if next_entry_offset == 0 {
@@ -633,28 +740,14 @@ unsafe fn find_target_process() -> Result<PEPROCESS, FindProcessDebug> {
 
     ExFreePoolWithTag(buf as PVOID, POOL_TAG);
 
-    let Some(pid) = matched_pid else {
-        return Err(FindProcessDebug {
-            status,
-            actual_len,
-            first_next_entry_offset,
-            seen,
-            first_dword_after_call,
-        });
-    };
+    let pid = matched_pid?;
 
     let mut proc: PEPROCESS = core::ptr::null_mut();
     let lookup_status = PsLookupProcessByProcessId(pid, &mut proc);
     if lookup_status != STATUS_SUCCESS || proc.is_null() {
-        return Err(FindProcessDebug {
-            status: lookup_status,
-            actual_len,
-            first_next_entry_offset,
-            seen,
-            first_dword_after_call,
-        });
+        return None;
     }
-    Ok(proc)
+    Some(proc)
 }
 
 unsafe fn resolve_io_create_device_secure() -> Option<IoCreateDeviceSecureFn> {
@@ -700,28 +793,44 @@ unsafe fn read_player_world_position(
     let base = read_main_module_base(proc).ok_or(1u8)?;
     let anchor = resolve_world_anchor(proc, base).ok_or(1u8)?;
 
+    // Single attach spans the rest of this function (chain walk + transform +
+    // world origin — up to 9 separate reads) instead of attaching/detaching
+    // per read. World-anchor resolution above keeps its own one-shot
+    // attach(es) via kread/kread_ptr (resolve_world_anchor's cache-miss path
+    // calls find_hardcoded_world_anchor, a rare/slow pattern scan where one
+    // more attach doesn't matter — not worth the complexity of folding it
+    // into this guard too).
+    let _guard = AttachGuard::new(proc);
+
     let mut ptr = anchor;
     for i in 0..PLAYER_COORD_CONFIG.chain.len() {
-        ptr = kread_ptr(proc, ptr + PLAYER_COORD_CONFIG.chain[i]).ok_or((i + 2) as u8)?;
+        ptr = kread_ptr_raw(ptr + PLAYER_COORD_CONFIG.chain[i]).ok_or((i + 2) as u8)?;
     }
 
-    let mut rel = core::mem::MaybeUninit::<FRelativeTransform>::uninit();
-    if !kread(
-        proc,
+    // ComponentToWorld is a full FTransform (quaternion rotation + location +
+    // scale), not an FRelativeTransform (FVector + FRotator) — USceneComponent
+    // caches the world-space transform this way, distinct from the older
+    // separate RelativeLocation/RelativeRotation members FRelativeTransform
+    // models. Reading it as FRelativeTransform would misinterpret the
+    // quaternion's first three floats as a location and the rest as a
+    // rotator, silently producing wrong (but plausible-looking) numbers.
+    let mut xf = core::mem::MaybeUninit::<FTransform>::uninit();
+    if !kread_raw(
         ptr + PLAYER_COORD_CONFIG.relative_location_offset,
-        rel.as_mut_ptr() as *mut u8,
-        core::mem::size_of::<FRelativeTransform>(),
+        xf.as_mut_ptr() as *mut u8,
+        core::mem::size_of::<FTransform>(),
     ) {
         return Err((PLAYER_COORD_CONFIG.chain.len() + 2) as u8);
     }
-    let rel = rel.assume_init();
+    let xf = xf.assume_init();
+    let (roll, pitch, yaw) = quat_to_euler(xf.rx, xf.ry, xf.rz, xf.rw);
 
     let iv = if PLAYER_COORD_CONFIG.add_world_origin {
+        // UWorld::PersistentLevel is at +0x38 (v3.4.0+ offsets), not +0x30.
         let persistent_level =
-            kread_ptr(proc, anchor + 0x30).ok_or((PLAYER_COORD_CONFIG.chain.len() + 3) as u8)?;
+            kread_ptr_raw(anchor + 0x38).ok_or((PLAYER_COORD_CONFIG.chain.len() + 3) as u8)?;
         let mut iv = core::mem::MaybeUninit::<FIntVector>::uninit();
-        if !kread(
-            proc,
+        if !kread_raw(
             persistent_level + 0xC8,
             iv.as_mut_ptr() as *mut u8,
             core::mem::size_of::<FIntVector>(),
@@ -734,12 +843,12 @@ unsafe fn read_player_world_position(
     };
 
     Ok((
-        rel.location.x + iv.x as f32,
-        rel.location.y + iv.y as f32,
-        rel.location.z + iv.z as f32,
-        rel.rotation.pitch,
-        rel.rotation.yaw,
-        rel.rotation.roll,
+        xf.lx + iv.x as f32,
+        xf.ly + iv.y as f32,
+        xf.lz + iv.z as f32,
+        pitch,
+        yaw,
+        roll,
     ))
 }
 
@@ -863,8 +972,12 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
         let mut batch_end = fs[i].1 as u64;
         let mut j = i + 1;
         while j < n {
-            if fs[j].0 as u64 - batch_end > BATCH_GAP
-                || fs[j].1 as u64 - batch_start > MAX_BATCH as u64
+            // saturating_sub: fs is sorted by begin but the sort gives no
+            // guarantee against overlapping ranges, and release builds run
+            // with overflow-checks off, so a plain `-` would silently wrap
+            // instead of panicking if begin ever preceded batch_end/batch_start.
+            if (fs[j].0 as u64).saturating_sub(batch_end) > BATCH_GAP
+                || (fs[j].1 as u64).saturating_sub(batch_start) > MAX_BATCH as u64
             {
                 break;
             }
