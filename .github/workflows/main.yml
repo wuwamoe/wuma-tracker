@@ -29,6 +29,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: install frontend dependencies
+        shell: pwsh
         run: bun install
 
       - name: install WiX v7
@@ -60,11 +61,11 @@ jobs:
         run: bun run tauri build --bundles nsis
 
       - name: collect bundle
-        shell: bash
+        shell: pwsh
         run: |
-          set -eu
-          cp src-tauri/target/release/bundle/nsis/*.exe dist/
-          cp src-tauri/target/release/bundle/nsis/*.exe.sig dist/
+          $ErrorActionPreference = "Stop"
+          Copy-Item src-tauri/target/release/bundle/nsis/*.exe dist/
+          Copy-Item src-tauri/target/release/bundle/nsis/*.exe.sig dist/
 
       - uses: actions/upload-artifact@v4
         with:
