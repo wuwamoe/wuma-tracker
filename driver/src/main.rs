@@ -1005,6 +1005,7 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
     const BATCH_GAP: u64 = 4096;
     const HEADER_READ: usize = 4096;
     const MAX_BATCH: usize = 512 * 1024;
+    const RECORD_SIZE: usize = 12; // sizeof(RUNTIME_FUNCTION)
 
     let hb = alloc_npnx(HEADER_READ, POOL_TAG);
     if hb.is_null() {
@@ -1040,48 +1041,30 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
     ExFreePoolWithTag(hb as PVOID, POOL_TAG);
 
     let (soi, prva, psz) = header_info?;
-    if prva == 0 || psz < 12 {
+    if prva == 0 || psz < RECORD_SIZE {
         return None;
     }
 
-    let pread = psz.min(MAX_BATCH);
-    let pb = alloc_npnx(pread, POOL_TAG);
+    // .pdata itself can be tens of MB in large builds (millions of RUNTIME_FUNCTION
+    // entries) — reading it in one shot capped at MAX_BATCH silently drops everything
+    // past the first ~43k entries. Instead, walk it in MAX_BATCH-sized windows, each
+    // parsed and scanned independently, so pool usage stays bounded regardless of
+    // table size while still covering every entry.
+    let max_entries_per_window = MAX_BATCH / RECORD_SIZE;
+    let total_entries = psz / RECORD_SIZE;
+
+    let pb = alloc_npnx(MAX_BATCH, POOL_TAG);
     if pb.is_null() {
         return None;
     }
-    if !kread(proc, base + prva, pb, pread) {
-        ExFreePoolWithTag(pb as PVOID, POOL_TAG);
-        return None;
-    }
-
-    let entries = pread / 12;
-    let fb =
-        alloc_npnx(entries * 8, POOL_TAG) as *mut (u32, u32);
+    let fb = alloc_npnx(max_entries_per_window * 8, POOL_TAG) as *mut (u32, u32);
     if fb.is_null() {
         ExFreePoolWithTag(pb as PVOID, POOL_TAG);
         return None;
     }
-
-    let ps = core::slice::from_raw_parts(pb, pread);
-    let fs = core::slice::from_raw_parts_mut(fb, entries);
-    let mut n = 0;
-    for i in 0..entries {
-        let Some(begin) = read_u32(ps, i * 12) else {
-            continue;
-        };
-        let Some(end) = read_u32(ps, i * 12 + 4) else {
-            continue;
-        };
-        if begin > 0 && end > begin && (end as usize) <= soi {
-            fs[n] = (begin, end);
-            n += 1;
-        }
-    }
-    ExFreePoolWithTag(pb as PVOID, POOL_TAG);
-    fs[..n].sort_unstable_by_key(|&(begin, _)| begin);
-
     let sb = alloc_npnx(MAX_BATCH, POOL_TAG);
     if sb.is_null() {
+        ExFreePoolWithTag(pb as PVOID, POOL_TAG);
         ExFreePoolWithTag(fb as PVOID, POOL_TAG);
         return None;
     }
@@ -1089,55 +1072,93 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
     let instruction_len = WORLD_ANCHOR_PATTERN_PREFIX.len() + 4;
     let pattern_len = instruction_len + WORLD_ANCHOR_PATTERN_SUFFIX.len();
     let mut result = None;
-    let mut i = 0;
+    let mut entry_off = 0usize;
 
-    'out: while i < n {
-        let batch_start = fs[i].0 as u64;
-        let mut batch_end = fs[i].1 as u64;
-        let mut j = i + 1;
-        while j < n {
-            // saturating_sub: fs is sorted by begin but the sort gives no
-            // guarantee against overlapping ranges, and release builds run
-            // with overflow-checks off, so a plain `-` would silently wrap
-            // instead of panicking if begin ever preceded batch_end/batch_start.
-            if (fs[j].0 as u64).saturating_sub(batch_end) > BATCH_GAP
-                || (fs[j].1 as u64).saturating_sub(batch_start) > MAX_BATCH as u64
-            {
-                break;
-            }
-            batch_end = fs[j].1 as u64;
-            j += 1;
+    'windows: while entry_off < total_entries {
+        let window_entries = (total_entries - entry_off).min(max_entries_per_window);
+        let window_bytes = window_entries * RECORD_SIZE;
+        let window_pdata_off = (entry_off * RECORD_SIZE) as u64;
+
+        if !kread(proc, base + prva + window_pdata_off, pb, window_bytes) {
+            // Skip just this window on read failure; the rest of the table may
+            // still be readable and worth scanning.
+            entry_off += window_entries;
+            continue;
         }
 
-        let read_size = ((batch_end - batch_start) as usize).min(MAX_BATCH);
-        if read_size >= pattern_len && kread(proc, base + batch_start, sb, read_size) {
-            let scan = core::slice::from_raw_parts(sb, read_size);
-            'scan: for off in 0..read_size - pattern_len + 1 {
-                if scan[off..off + WORLD_ANCHOR_PATTERN_PREFIX.len()] != *WORLD_ANCHOR_PATTERN_PREFIX {
-                    continue;
+        let ps = core::slice::from_raw_parts(pb, window_bytes);
+        let fs = core::slice::from_raw_parts_mut(fb, window_entries);
+        let mut n = 0;
+        for i in 0..window_entries {
+            let Some(begin) = read_u32(ps, i * RECORD_SIZE) else {
+                continue;
+            };
+            let Some(end) = read_u32(ps, i * RECORD_SIZE + 4) else {
+                continue;
+            };
+            // A real function is never anywhere near MAX_BATCH in size; entries
+            // this large are corrupt/garbage and would otherwise each force their
+            // own oversized single-entry batch read below.
+            let size_ok = end.saturating_sub(begin) as u64 <= MAX_BATCH as u64;
+            if begin > 0 && end > begin && (end as usize) <= soi && size_ok {
+                fs[n] = (begin, end);
+                n += 1;
+            }
+        }
+        fs[..n].sort_unstable_by_key(|&(begin, _)| begin);
+
+        let mut i = 0;
+        while i < n {
+            let batch_start = fs[i].0 as u64;
+            let mut batch_end = fs[i].1 as u64;
+            let mut j = i + 1;
+            while j < n {
+                // saturating_sub: fs is sorted by begin but the sort gives no
+                // guarantee against overlapping ranges, and release builds run
+                // with overflow-checks off, so a plain `-` would silently wrap
+                // instead of panicking if begin ever preceded batch_end/batch_start.
+                if (fs[j].0 as u64).saturating_sub(batch_end) > BATCH_GAP
+                    || (fs[j].1 as u64).saturating_sub(batch_start) > MAX_BATCH as u64
+                {
+                    break;
                 }
-                for (k, &v) in WORLD_ANCHOR_PATTERN_SUFFIX.iter().enumerate() {
-                    if v != 0xFF && scan[off + instruction_len + k] != v {
-                        continue 'scan;
+                batch_end = fs[j].1 as u64;
+                j += 1;
+            }
+
+            let read_size = ((batch_end - batch_start) as usize).min(MAX_BATCH);
+            if read_size >= pattern_len && kread(proc, base + batch_start, sb, read_size) {
+                let scan = core::slice::from_raw_parts(sb, read_size);
+                'scan: for off in 0..read_size - pattern_len + 1 {
+                    if scan[off..off + WORLD_ANCHOR_PATTERN_PREFIX.len()] != *WORLD_ANCHOR_PATTERN_PREFIX {
+                        continue;
+                    }
+                    for (k, &v) in WORLD_ANCHOR_PATTERN_SUFFIX.iter().enumerate() {
+                        if v != 0xFF && scan[off + instruction_len + k] != v {
+                            continue 'scan;
+                        }
+                    }
+
+                    let Some(disp) = read_i32(scan, off + WORLD_ANCHOR_PATTERN_PREFIX.len()) else {
+                        continue;
+                    };
+                    let instr_rva = batch_start + off as u64;
+                    let world_anchor_rva = ((instr_rva as i64) + instruction_len as i64 + disp as i64) as u64;
+                    if world_anchor_rva > 0 && world_anchor_rva < soi as u64 {
+                        result = Some(world_anchor_rva);
+                        break 'windows;
                     }
                 }
-
-                let Some(disp) = read_i32(scan, off + WORLD_ANCHOR_PATTERN_PREFIX.len()) else {
-                    continue;
-                };
-                let instr_rva = batch_start + off as u64;
-                let world_anchor_rva = ((instr_rva as i64) + instruction_len as i64 + disp as i64) as u64;
-                if world_anchor_rva > 0 && world_anchor_rva < soi as u64 {
-                    result = Some(world_anchor_rva);
-                    break 'out;
-                }
             }
+            i = j;
         }
-        i = j;
+
+        entry_off += window_entries;
     }
 
-    ExFreePoolWithTag(sb as PVOID, POOL_TAG);
+    ExFreePoolWithTag(pb as PVOID, POOL_TAG);
     ExFreePoolWithTag(fb as PVOID, POOL_TAG);
+    ExFreePoolWithTag(sb as PVOID, POOL_TAG);
     result
 }
 
