@@ -1,19 +1,15 @@
 {
-  "version": "2.0.0",
+  "version": "2.0.1",
   "notes": "## 설치 방법\r\n\r\n### Windows\r\n`.exe` 또는 `.msi` 파일을 다운로드하여 실행하세요.\r\n\r\n### macOS\r\n`.dmg` 파일을 다운로드한 후 앱을 Applications에 드래그하세요.\r\n\r\n> **⚠️ macOS 보안 경고 해제**\r\n> 미서명 앱이므로 처음 실행 시 차단될 수 있습니다.\r\n> 1. 앱을 우클릭 → **열기** → **열기** 클릭\r\n> 2. 또는 **시스템 설정 → 개인 정보 보호 및 보안 → 확인 없이 열기**",
-  "pub_date": "2026-08-18T09:06:05.528Z",
+  "pub_date": "2026-08-20T04:25:32.086Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZUZEcxNE9XZFhNVmN4WWxOcGMwTXdRalZyVTFGblRUTkRTMUJ3WkhwSFJIZGpPVkEzY2pkWFpHUlRWa01yYkVWWFRHeDBTWHBWU0habVp6VkpZa3RQV25CTlV5dHZPVVJpZHpoT2VrRlNUbXRzWlROSk1WWnhWSGcwZUhsMFJuZHpQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnM01EUXpPVFU1Q1dacGJHVTZWM1Z0WVZSeVlXTnJaWEpmTWk0d0xqQmZlRFkwTG0xemFRcEdUSGRCUzFwVGExUkZhWGhXTUhwVGFFNVhOSGx3Um1KVlpXdExhWEJ3WlhGTU1VMUVSWGRPVjNKbVZHOXljM2MyWVRWdWREaE1jR3MwU3pablJYaGpOM1Y1YXpocGVGUjZZMmMyZEd0bVpFOTNXRXBDWnowOUNnPT0=",
-      "url": "https://github.com/wuwamoe/wuma-tracker/releases/download/v2.0.0/WumaTracker_2.0.0_x64.msi"
+      "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZUZEcxNE9XZFhNVmN4WW1WU1ZUazBkVTB6U3pCRlJHWnVTamx2TkZsS1pVZFRWM3A1VVhWa05GZEdSWFZsWlhZNFpFMVlPVlF6T0RVd01VTlBjWFU0ZUVSbEwxUmlkREJRTW5GVmJFNVhabVpSTmt0VGJDOTBUSEpaVlZWT04yZDNQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnM01UazVPVEl3Q1dacGJHVTZWM1Z0WVZSeVlXTnJaWEpmTWk0d0xqRmZlRFkwTG0xemFRcHVVak5xWW1wS1YwbzBNQ3RNWTBOd1JrWXZOREIwVGtac2NFcEdUV1ZLZGtaV05GSlFlWFZLWjFwbFRucEpaelIwT1dac05scEtOemRuY0dSa05EQlJORkUwVUhwNVp6ZExhbnBGUzNWbWJITkZiSE5DZHowOUNnPT0=",
+      "url": "https://github.com/wuwamoe/wuma-tracker/releases/download/v2.0.1/WumaTracker_2.0.1_x64.msi"
     },
     "windows-x86_64-msi": {
-      "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZUZEcxNE9XZFhNVmN4WWxOcGMwTXdRalZyVTFGblRUTkRTMUJ3WkhwSFJIZGpPVkEzY2pkWFpHUlRWa01yYkVWWFRHeDBTWHBWU0habVp6VkpZa3RQV25CTlV5dHZPVVJpZHpoT2VrRlNUbXRzWlROSk1WWnhWSGcwZUhsMFJuZHpQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnM01EUXpPVFU1Q1dacGJHVTZWM1Z0WVZSeVlXTnJaWEpmTWk0d0xqQmZlRFkwTG0xemFRcEdUSGRCUzFwVGExUkZhWGhXTUhwVGFFNVhOSGx3Um1KVlpXdExhWEJ3WlhGTU1VMUVSWGRPVjNKbVZHOXljM2MyWVRWdWREaE1jR3MwU3pablJYaGpOM1Y1YXpocGVGUjZZMmMyZEd0bVpFOTNXRXBDWnowOUNnPT0=",
-      "url": "https://github.com/wuwamoe/wuma-tracker/releases/download/v2.0.0/WumaTracker_2.0.0_x64.msi"
-    },
-    "windows-x86_64-nsis": {
-      "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZUZEcxNE9XZFhNVmN4WW1GUGVsSTNVVzh2T0Uxc1UyTndkSGxKUm5SWVNUWkVZWGgzUzNaclEwODRiSEJEWXpOdlZWZGhXVXBpVkVaUFdtSnNUVFl5YW1KWWVVdHlXbWN6YlUxcFJucFZXVUYzY2pWMlpua3daemsyUWxreU1IZFJQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnM01EUXhOelk0Q1dacGJHVTZWM1Z0WVZSeVlXTnJaWEpmTWk0d0xqQmZlRFkwTFhObGRIVndMbVY0WlFwcGExQXhaR2xHU0hSQk5GUlRObHBCYWpCT2R5OW5UMFYzV1RWQmFrNXlObU5XWkhVeFEwbHdXR0UyZG5Cd2FpODBOSG8yTUhabWJYUlVkU3RZUm10VmNtTkNSM3BRVmpnNVVsSTVUM1ZDV2xoeFFVMUJkejA5Q2c9PQ==",
-      "url": "https://github.com/wuwamoe/wuma-tracker/releases/download/v2.0.0/WumaTracker_2.0.0_x64-setup.exe"
+      "signature": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUhOcFoyNWhkSFZ5WlNCbWNtOXRJSFJoZFhKcElITmxZM0psZENCclpYa0tVbFZUZEcxNE9XZFhNVmN4WW1WU1ZUazBkVTB6U3pCRlJHWnVTamx2TkZsS1pVZFRWM3A1VVhWa05GZEdSWFZsWlhZNFpFMVlPVlF6T0RVd01VTlBjWFU0ZUVSbEwxUmlkREJRTW5GVmJFNVhabVpSTmt0VGJDOTBUSEpaVlZWT04yZDNQUXAwY25WemRHVmtJR052YlcxbGJuUTZJSFJwYldWemRHRnRjRG94TnpnM01UazVPVEl3Q1dacGJHVTZWM1Z0WVZSeVlXTnJaWEpmTWk0d0xqRmZlRFkwTG0xemFRcHVVak5xWW1wS1YwbzBNQ3RNWTBOd1JrWXZOREIwVGtac2NFcEdUV1ZLZGtaV05GSlFlWFZLWjFwbFRucEpaelIwT1dac05scEtOemRuY0dSa05EQlJORkUwVUhwNVp6ZExhbnBGUzNWbWJITkZiSE5DZHowOUNnPT0=",
+      "url": "https://github.com/wuwamoe/wuma-tracker/releases/download/v2.0.1/WumaTracker_2.0.1_x64.msi"
     }
   }
 }
