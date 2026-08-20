@@ -28,13 +28,19 @@
 #   wix extension add WixToolset.UI.wixext -g
 #
 # 사용법:
-#   .\build-msi.ps1 [-Arch x64|x86|arm64] [-Version 1.9.0] [-SkipAppBuild] [-DriverSysPath ...]
+#   .\build-msi.ps1 [-Arch x64|x86|arm64] [-Version 1.9.0] [-SkipAppBuild] [-SkipSign] [-DriverSysPath ...]
+#
+# -SkipSign: 2단계(메인 exe EV/signtool 서명)를 건너뛴다. 결과 exe/MSI는
+#   미서명 상태로 나온다 — UAC 승격 요청 시 "확인된 게시자"가 안 뜨고, 이
+#   MSI에는 sign-msi.ps1(업데이터 시그니처 재생성 포함)을 돌릴 수 없다. 로컬
+#   테스트/빠른 반복 용도로만 쓸 것.
 
 param(
     [ValidateSet("x64", "x86", "arm64")]
     [string]$Arch = "x64",
     [string]$Version,
     [switch]$SkipAppBuild,
+    [switch]$SkipSign,
     [string]$DriverSysPath
 )
 
@@ -69,9 +75,13 @@ if (-not (Test-Path $MainBinaryPath)) {
     throw "메인 바이너리를 찾을 수 없습니다: $MainBinaryPath (-SkipAppBuild 없이 먼저 빌드하세요)"
 }
 
-Write-Host "--- 2단계: 메인 exe 서명 (signtool) ---" -ForegroundColor Cyan
-. "$RepoRoot\Sign-Authenticode.ps1"
-Invoke-AuthenticodeSign -FilePath $MainBinaryPath
+if ($SkipSign) {
+    Write-Host "--- 2단계: -SkipSign 지정됨, 메인 exe 서명 생략 ---" -ForegroundColor Yellow
+} else {
+    Write-Host "--- 2단계: 메인 exe 서명 (signtool) ---" -ForegroundColor Cyan
+    . "$RepoRoot\Sign-Authenticode.ps1"
+    Invoke-AuthenticodeSign -FilePath $MainBinaryPath
+}
 
 if (-not (Test-Path $DriverSysPath)) {
     throw "서명된 드라이버를 찾지 못했습니다: $DriverSysPath (Attestation 서명 완료 후 driver/signed/WumaDisplayService.sys로 복사해뒀는지 확인하세요)"

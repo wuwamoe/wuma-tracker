@@ -185,21 +185,6 @@ extern "system" {
         Out: *mut SIZE_T,
     ) -> NTSTATUS;
     fn MmGetSystemRoutineAddress(SystemRoutineName: PUNICODE_STRING) -> PVOID;
-    // Long-stable ntoskrnl.exe export (used by the same class of tooling as
-    // Process Hacker/System Informer) that returns EPROCESS::SectionBaseAddress
-    // directly. Preferred over walking Peb->ImageBaseAddress: it needs no
-    // MmCopyMemory into the target's user address space (no attach, no risk
-    // of a partial/failed copy from that page), and it's immune to the
-    // Peb->ImageBaseAddress vs Wow64Process->Peb32->ImageBaseAddress split
-    // that WOW64 processes have.
-    fn PsGetProcessSectionBaseAddress(Process: PEPROCESS) -> *mut u8;
-    // Long-stable ntoskrnl.exe export returning a pointer to a fixed 16-byte
-    // (15 chars + NUL) buffer inside EPROCESS holding the truncated image
-    // base name. Used only to cheaply confirm a cached PID still refers to
-    // the expected process (PID reuse after the original process exits is
-    // the failure mode this guards against) without redoing the full
-    // ZwQuerySystemInformation process-list scan.
-    fn PsGetProcessImageFileName(Process: PEPROCESS) -> *mut u8;
     // Long-stable ntoskrnl.exe export; the mirror of PsLookupProcessByProcessId,
     // used to read back the PID of a process found via the full scan so it
     // can be cached.
@@ -263,6 +248,71 @@ type IoCreateDeviceSecureFn = unsafe extern "system" fn(
     PVOID,
     *mut PDEVICE_OBJECT,
 ) -> NTSTATUS;
+
+// PsGetProcessSectionBaseAddress and PsGetProcessImageFileName are NOT
+// declared in any WDK header (km\wdm.h, km\ntddk.h, km\ntifs.h — checked by
+// hand against A:\EWDK's headers, unlike PsGetProcessId/PsLookupProcessByProcessId
+// etc. which genuinely are documented there). They are undocumented exports —
+// real, and used by tooling like Process Hacker/System Informer, but not
+// covered by any Microsoft compatibility guarantee. A previous version of
+// this file called them as ordinary statically-linked `extern "system"` fns,
+// which puts them in the driver's PE import table: if either is missing from
+// a given Windows build's ntoskrnl.exe, the OS loader fails to resolve the
+// import and the driver refuses to load AT ALL with STATUS_PROCEDURE_NOT_FOUND
+// (surfaced by `sc start` as Win32 error 127, "The specified procedure could
+// not be found") — confirmed happening on a real user's machine even though
+// this driver loaded fine in-house. Resolving them dynamically via
+// MmGetSystemRoutineAddress (the same pattern already used for
+// IoCreateDeviceSecure below, and the documented-recommended way to call
+// undocumented exports per public driver-dev references) turns "missing on
+// this OS build" into a graceful `None`/target-not-found result instead of a
+// load failure — the callers below already handle that outcome the same way
+// they handle any other lookup failure.
+const PS_GET_PROCESS_SECTION_BASE_ADDRESS_NAME: [u16; 31] =
+    ascii_to_utf16("PsGetProcessSectionBaseAddress");
+const PS_GET_PROCESS_IMAGE_FILE_NAME_NAME: [u16; 26] = ascii_to_utf16("PsGetProcessImageFileName");
+
+type PsGetProcessSectionBaseAddressFn = unsafe extern "system" fn(Process: PEPROCESS) -> *mut u8;
+type PsGetProcessImageFileNameFn = unsafe extern "system" fn(Process: PEPROCESS) -> *mut u8;
+
+// 0 = not yet resolved (or resolution failed — MmGetSystemRoutineAddress
+// never legitimately returns a null/zero routine address on success).
+// Resolved once, lazily, on first use and cached — see the two
+// `ps_get_*`-wrapper fns below.
+static PS_GET_PROCESS_SECTION_BASE_ADDRESS_FN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static PS_GET_PROCESS_IMAGE_FILE_NAME_FN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+unsafe fn ps_get_process_section_base_address(proc: PEPROCESS) -> Option<*mut u8> {
+    let mut addr = PS_GET_PROCESS_SECTION_BASE_ADDRESS_FN.load(core::sync::atomic::Ordering::Relaxed);
+    if addr == 0 {
+        let mut name = ustr(&PS_GET_PROCESS_SECTION_BASE_ADDRESS_NAME);
+        let routine = MmGetSystemRoutineAddress(&mut name);
+        if routine.is_null() {
+            return None;
+        }
+        addr = routine as u64;
+        PS_GET_PROCESS_SECTION_BASE_ADDRESS_FN.store(addr, core::sync::atomic::Ordering::Relaxed);
+    }
+    let f: PsGetProcessSectionBaseAddressFn = core::mem::transmute(addr as usize);
+    Some(f(proc))
+}
+
+unsafe fn ps_get_process_image_file_name(proc: PEPROCESS) -> Option<*mut u8> {
+    let mut addr = PS_GET_PROCESS_IMAGE_FILE_NAME_FN.load(core::sync::atomic::Ordering::Relaxed);
+    if addr == 0 {
+        let mut name = ustr(&PS_GET_PROCESS_IMAGE_FILE_NAME_NAME);
+        let routine = MmGetSystemRoutineAddress(&mut name);
+        if routine.is_null() {
+            return None;
+        }
+        addr = routine as u64;
+        PS_GET_PROCESS_IMAGE_FILE_NAME_FN.store(addr, core::sync::atomic::Ordering::Relaxed);
+    }
+    let f: PsGetProcessImageFileNameFn = core::mem::transmute(addr as usize);
+    Some(f(proc))
+}
 
 use ioctls::GetLocationResponse;
 
@@ -358,7 +408,15 @@ unsafe extern "system" fn unload(drv: *mut u8) {
 /// renamed to match). See `driver/docs/DIRECT-ACCESS-PLAN.md`.
 unsafe fn caller_is_app() -> bool {
     let proc = IoGetCurrentProcess();
-    let name_ptr = PsGetProcessImageFileName(proc);
+    // If the underlying (undocumented) export isn't available on this
+    // Windows build, fail *open* on this specific check rather than
+    // permanently locking every caller out of the device: this check is
+    // explicitly friction, not the real access-control boundary (that's the
+    // device SDDL), so losing it shouldn't break the app entirely on a
+    // machine where this one API happens to be missing.
+    let Some(name_ptr) = ps_get_process_image_file_name(proc) else {
+        return true;
+    };
     !name_ptr.is_null()
         && core::slice::from_raw_parts(name_ptr, APP_NAME_PREFIX.len()) == &APP_NAME_PREFIX[..]
 }
@@ -645,9 +703,16 @@ unsafe fn try_cached_process() -> Option<PEPROCESS> {
         CACHED_PID.store(0, core::sync::atomic::Ordering::Relaxed);
         return None;
     }
-    let name_ptr = PsGetProcessImageFileName(proc);
-    let matches = !name_ptr.is_null()
-        && core::slice::from_raw_parts(name_ptr, CACHED_NAME_PREFIX.len()) == CACHED_NAME_PREFIX;
+    // If the underlying (undocumented) export isn't available on this
+    // Windows build, treat the cache as unusable (same as a name mismatch)
+    // rather than trusting an unverified PID — find_target_process's full
+    // rescan below doesn't depend on this API at all (it uses the documented
+    // ZwQuerySystemInformation image name instead), so this only costs the
+    // caching optimization, not correctness.
+    let matches = ps_get_process_image_file_name(proc).is_some_and(|name_ptr| {
+        !name_ptr.is_null()
+            && core::slice::from_raw_parts(name_ptr, CACHED_NAME_PREFIX.len()) == CACHED_NAME_PREFIX
+    });
     if !matches {
         ObDereferenceObjectDeferDelete(proc as PVOID);
         CACHED_PID.store(0, core::sync::atomic::Ordering::Relaxed);
@@ -916,7 +981,7 @@ unsafe fn read_main_module_base(proc: PEPROCESS) -> Option<u64> {
     // Peb->ImageBaseAddress: no attach, no MmCopyMemory into the target's
     // user address space, so it can't fail with STATUS_PARTIAL_COPY the way
     // that path did.
-    let raw = PsGetProcessSectionBaseAddress(proc) as u64;
+    let raw = ps_get_process_section_base_address(proc)? as u64;
     if !is_valid_ptr(raw) {
         return None;
     }
