@@ -15,7 +15,7 @@ mod ioctls;
 
 use wdk_sys::{
     ntddk::{
-        ExAllocatePool2, ExFreePoolWithTag, IoCreateSymbolicLink, IoDeleteDevice,
+        ExFreePoolWithTag, IoCreateSymbolicLink, IoDeleteDevice,
         IoDeleteSymbolicLink, IoGetCurrentProcess, IofCompleteRequest,
         ObDereferenceObjectDeferDelete, PsGetCurrentProcessId, PsLookupProcessByProcessId,
     },
@@ -49,6 +49,9 @@ const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 const STATUS_NOT_FOUND: NTSTATUS = 0xC000_0225u32 as i32;
 
 const POOL_FLAG_NON_PAGED: ULONG64 = 0x40;
+// POOL_TYPE::NonPagedPoolNx, the ExAllocatePoolWithTag fallback's equivalent
+// of POOL_FLAG_NON_PAGED above — see `alloc_npnx`.
+const NON_PAGED_POOL_NX: u32 = 512;
 // wdm.h: MM_COPY_MEMORY_PHYSICAL = 0x1, MM_COPY_MEMORY_VIRTUAL = 0x2. This was
 // previously 0x1 (the PHYSICAL flag), which told MmCopyMemory to treat every
 // `MmCopyAddr.va` as a physical address instead of a virtual one — every
@@ -213,6 +216,16 @@ extern "system" {
     ) -> NTSTATUS;
     fn KeStackAttachProcess(Process: PEPROCESS, ApcState: *mut u8);
     fn KeUnstackDetachProcess(ApcState: *mut u8);
+    // ExAllocatePool2 is Windows 10 2004 (build 19041)+ only — absent from
+    // ntoskrnl.exe on 1909/1809/LTSC 2019, so a static import of it makes the
+    // driver fail to load there with ERROR_PROC_NOT_FOUND (127) before
+    // DriverEntry ever runs. Not statically linked for that reason; resolved
+    // dynamically instead (see `resolve_pool_alloc`/`alloc_npnx`), with
+    // ExAllocatePoolWithTag (Windows 2000+, still exported through 11
+    // 24H2/25H2 despite the deprecated annotation) as the fallback when it's
+    // absent. This also means the newest builds keep using ExAllocatePool2
+    // rather than being pinned to the deprecated call forever.
+    fn ExAllocatePoolWithTag(PoolType: u32, NumberOfBytes: SIZE_T, Tag: ULONG) -> PVOID;
     fn KeBugCheckEx(
         BugCheckCode: ULONG,
         BugCheckParameter1: ULONG_PTR,
@@ -288,6 +301,8 @@ unsafe fn ustr(buf: &[u16]) -> UNICODE_STRING {
 
 #[export_name = "DriverEntry"]
 pub unsafe extern "system" fn driver_entry(drv: *mut u8, _: PUNICODE_STRING) -> NTSTATUS {
+    resolve_pool_alloc();
+
     let Some(io_create_device_secure) = resolve_io_create_device_secure() else {
         return STATUS_UNSUCCESSFUL;
     };
@@ -677,7 +692,7 @@ unsafe fn resolve_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
 
 unsafe fn find_target_process() -> Option<PEPROCESS> {
     let mut buf_len: u32 = 64 * 1024;
-    let mut buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, buf_len as SIZE_T, POOL_TAG) as *mut u8;
+    let mut buf = alloc_npnx(buf_len as usize, POOL_TAG);
     if buf.is_null() {
         return None;
     }
@@ -693,7 +708,7 @@ unsafe fn find_target_process() -> Option<PEPROCESS> {
     while status == STATUS_INFO_LENGTH_MISMATCH && retries < 8 {
         ExFreePoolWithTag(buf as PVOID, POOL_TAG);
         buf_len = actual_len.saturating_add(4096);
-        buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, buf_len as SIZE_T, POOL_TAG) as *mut u8;
+        buf = alloc_npnx(buf_len as usize, POOL_TAG);
         if buf.is_null() {
             return None;
         }
@@ -760,6 +775,50 @@ unsafe fn resolve_io_create_device_secure() -> Option<IoCreateDeviceSecureFn> {
             routine,
         ))
     }
+}
+
+type ExAllocatePool2Fn =
+    unsafe extern "system" fn(ULONG64, SIZE_T, ULONG) -> PVOID;
+const EX_ALLOCATE_POOL2_NAME: [u16; 16] = ascii_to_utf16("ExAllocatePool2");
+
+// Holds the resolved ExAllocatePool2 function pointer once
+// `resolve_pool_alloc` has run (0 = not resolved / unavailable on this
+// build). Read with Relaxed: `resolve_pool_alloc` runs once from
+// DriverEntry before any dispatch routine (and thus any allocation) can be
+// reached, so there is no concurrent writer for `alloc_npnx`'s reads to race
+// with.
+static EX_ALLOCATE_POOL2: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Resolves `ExAllocatePool2` dynamically so its name never appears in the
+/// driver's static import table (see the comment on the `extern` block
+/// above). Called once from `DriverEntry`; a null result just means this
+/// build's ntoskrnl.exe predates 19041, and `alloc_npnx` falls back to
+/// `ExAllocatePoolWithTag`.
+unsafe fn resolve_pool_alloc() {
+    let mut name = ustr(&EX_ALLOCATE_POOL2_NAME);
+    let routine = MmGetSystemRoutineAddress(&mut name);
+    EX_ALLOCATE_POOL2.store(routine as usize, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Single allocation path for every non-paged, non-executable pool request
+/// in this driver: uses `ExAllocatePool2` when this build's ntoskrnl.exe
+/// exports it, otherwise falls back to `ExAllocatePoolWithTag`. See the
+/// comment on the `extern` block above for why `ExAllocatePool2` can't be a
+/// static import.
+unsafe fn alloc_npnx(size: usize, tag: ULONG) -> *mut u8 {
+    let pool2 = EX_ALLOCATE_POOL2.load(core::sync::atomic::Ordering::Relaxed);
+    if pool2 != 0 {
+        let f: ExAllocatePool2Fn = core::mem::transmute(pool2);
+        return f(POOL_FLAG_NON_PAGED, size as SIZE_T, tag) as *mut u8;
+    }
+    // ExAllocatePoolWithTag doesn't zero the returned memory the way
+    // ExAllocatePool2 does by default (no POOL_FLAG_ZERO here, so the two
+    // are actually equivalent) — this call site never relied on zeroed
+    // memory in the first place (buffers are fully overwritten by
+    // ZwQuerySystemInformation/MmCopyMemory before being read), so no
+    // extra zeroing is added here either.
+    ExAllocatePoolWithTag(NON_PAGED_POOL_NX, size as SIZE_T, tag) as *mut u8
 }
 
 unsafe fn unicode_path_ends_with_target(name: &UNICODE_STRING) -> bool {
@@ -882,7 +941,7 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
     const HEADER_READ: usize = 4096;
     const MAX_BATCH: usize = 512 * 1024;
 
-    let hb = ExAllocatePool2(POOL_FLAG_NON_PAGED, HEADER_READ as SIZE_T, POOL_TAG) as *mut u8;
+    let hb = alloc_npnx(HEADER_READ, POOL_TAG);
     if hb.is_null() {
         return None;
     }
@@ -921,7 +980,7 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
     }
 
     let pread = psz.min(MAX_BATCH);
-    let pb = ExAllocatePool2(POOL_FLAG_NON_PAGED, pread as SIZE_T, POOL_TAG) as *mut u8;
+    let pb = alloc_npnx(pread, POOL_TAG);
     if pb.is_null() {
         return None;
     }
@@ -932,7 +991,7 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
 
     let entries = pread / 12;
     let fb =
-        ExAllocatePool2(POOL_FLAG_NON_PAGED, (entries * 8) as SIZE_T, POOL_TAG) as *mut (u32, u32);
+        alloc_npnx(entries * 8, POOL_TAG) as *mut (u32, u32);
     if fb.is_null() {
         ExFreePoolWithTag(pb as PVOID, POOL_TAG);
         return None;
@@ -956,7 +1015,7 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
     ExFreePoolWithTag(pb as PVOID, POOL_TAG);
     fs[..n].sort_unstable_by_key(|&(begin, _)| begin);
 
-    let sb = ExAllocatePool2(POOL_FLAG_NON_PAGED, MAX_BATCH as SIZE_T, POOL_TAG) as *mut u8;
+    let sb = alloc_npnx(MAX_BATCH, POOL_TAG);
     if sb.is_null() {
         ExFreePoolWithTag(fb as PVOID, POOL_TAG);
         return None;
@@ -1032,7 +1091,7 @@ use core::alloc::{GlobalAlloc, Layout};
 struct KAlloc;
 unsafe impl GlobalAlloc for KAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ExAllocatePool2(POOL_FLAG_NON_PAGED, layout.size() as SIZE_T, ALLOC_TAG) as *mut u8
+        alloc_npnx(layout.size(), ALLOC_TAG)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, _: Layout) {
         ExFreePoolWithTag(ptr as PVOID, ALLOC_TAG);
