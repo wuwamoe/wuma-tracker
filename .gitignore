@@ -24,3 +24,8 @@ msix_staging
 
 # MSI 빌드 아티팩트 (build-msi.ps1 / sign-msi.ps1)
 /dist/
+
+# 설치 프로그램(installer/) .NET 빌드 산출물, build-installer.ps1이 채우는 payload
+installer/*/bin/
+installer/*/obj/
+installer/WumaTracker.Setup/payload/

@@ -25,15 +25,20 @@ function sigFor(filename) {
 
 const files = readdirSync(bundleDir);
 const msi = files.find((f) => f.endsWith('.msi'));
-const nsis = files.find((f) => f.endsWith('.exe'));
+// Not an NSIS installer since specs/0005-wpf-installer.md — it's the WPF
+// app in installer/WumaTracker.Setup — but still just a *-setup.exe file
+// here, found the same way.
+const setupExe = files.find((f) => f.endsWith('.exe'));
 
-if (!msi || !nsis) {
-  console.error(`msi/nsis 산출물을 찾지 못했습니다. dir=${bundleDir} files=${files.join(', ')}`);
+if (!msi || !setupExe) {
+  console.error(`msi/설치 프로그램 산출물을 찾지 못했습니다. dir=${bundleDir} files=${files.join(', ')}`);
   process.exit(1);
 }
 
 // windows-x86_64는 tauri updater 플러그인이 실제로 참조하는 키.
-// -msi/-nsis는 기존 tauri-action 산출물과의 호환을 위해 함께 남겨둔다.
+// -msi/-nsis는 기존 tauri-action 산출물과의 호환을 위해 함께 남겨둔다
+// (키 이름은 그대로 유지 — 실제로는 더 이상 NSIS가 아니지만, 이 키를 참조하는
+// 쪽에서 문자열 자체를 특별 취급하진 않으므로 이름을 바꿀 이유가 없다).
 const manifest = {
   version,
   notes,
@@ -48,8 +53,8 @@ const manifest = {
       url: releaseUrl(msi),
     },
     'windows-x86_64-nsis': {
-      signature: sigFor(nsis),
-      url: releaseUrl(nsis),
+      signature: sigFor(setupExe),
+      url: releaseUrl(setupExe),
     },
   },
 };
@@ -57,5 +62,5 @@ const manifest = {
 writeFileSync(resolve(root, 'latest.json'), JSON.stringify(manifest, null, 2) + '\n');
 
 console.log(`✓ latest.json 생성됨 (v${version})`);
-console.log(`  msi:  ${basename(msi)}`);
-console.log(`  nsis: ${basename(nsis)}`);
+console.log(`  msi:     ${basename(msi)}`);
+console.log(`  installer: ${basename(setupExe)}`);

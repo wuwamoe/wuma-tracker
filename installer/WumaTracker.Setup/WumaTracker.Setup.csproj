@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- .NET Framework instead of modern .NET: every supported Windows
+         version (10 1803+, 11) already has 4.7.2+ preinstalled, so the
+         published exe just needs WPF's GAC-resident assemblies — no
+         runtime to bundle at all, unlike net8.0-windows's self-contained
+         ~190MB (or even ~80MB compressed). Only 4.7.2 reference assemblies
+         are available on this machine (no 4.8 targeting pack), and 4.7.2
+         is still safely within what every supported Windows version ships. -->
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>WumaTracker.Setup</AssemblyName>
+    <RootNamespace>WumaTracker.Setup</RootNamespace>
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- For StopDriverServiceIfRunning's ServiceController use — not
+         referenced by default in an SDK-style WPF project. -->
+    <Reference Include="System.ServiceProcess" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The app binary + driver files this installer places into
+         Program Files. build-installer.ps1 Brotli-compresses each one
+         (via installer/PayloadCompressor) before staging it here — net472
+         has no PublishSingleFile-style bundle compression to fall back on,
+         and an embedded resource is otherwise stored byte-for-byte as-is.
+         Not committed (git-ignored), same reasoning as driver/target/. -->
+    <EmbeddedResource Include="payload\**" Condition="Exists('payload')">
+      <LogicalName>payload.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <Resource Include="Assets\logo-light.png" />
+    <Resource Include="Assets\logo-dark.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same package installer/PayloadCompressor uses to compress — kept
+         on the same version deliberately so build-time compression and
+         runtime decompression speak the exact same format.
+         GeneratePathProperty exposes $(PkgBrotliSharpLib) below, so the
+         embed path isn't a hardcoded machine-specific NuGet cache path. -->
+    <PackageReference Include="BrotliSharpLib" Version="0.3.3" GeneratePathProperty="true" />
+    <!-- Transitive dependency of BrotliSharpLib — same "no
+         PublishSingleFile on net472" problem, needs embedding too. -->
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="4.5.2" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- net472 has no PublishSingleFile-style bundling — a PackageReference
+         is otherwise just a loose BrotliSharpLib.dll sitting next to the
+         exe, which build-installer.ps1's "copy just the .exe" step would
+         silently drop. Embed the DLL's own bytes as a resource instead and
+         load it via AssemblyResolve (see App.xaml.cs's static ctor) — the
+         standard way to keep a net472 app to a single distributable file
+         once it has any dependency beyond the BCL/GAC. -->
+    <EmbeddedResource Include="$(PkgBrotliSharpLib)\lib\net451\BrotliSharpLib.dll">
+      <LogicalName>BrotliSharpLib.dll</LogicalName>
+      <Link>BrotliSharpLib.dll</Link>
+    </EmbeddedResource>
+    <EmbeddedResource Include="$(PkgSystem_Runtime_CompilerServices_Unsafe)\lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll">
+      <LogicalName>System.Runtime.CompilerServices.Unsafe.dll</LogicalName>
+      <Link>System.Runtime.CompilerServices.Unsafe.dll</Link>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

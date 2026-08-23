@@ -204,10 +204,12 @@
              comment on the DriverSys component for why this isn't
              ServiceInstall/ServiceControl.
 
-             The actual logic lives in driver/scripts/msi-register-driver.ps1
-             and msi-unregister-driver.ps1 (installed alongside the app — see
-             the RegisterDriverScript/UnregisterDriverScript components
-             above), NOT inline in ExeCommand. It used to be inline, and that
+             The actual logic lives in driver/scripts/register-driver.ps1
+             and unregister-driver.ps1 (shared with the NSIS installer's
+             hooks — see src-tauri/windows/hooks.nsh — installed alongside
+             the app via the RegisterDriverScript/UnregisterDriverScript
+             components above), NOT inline in ExeCommand. It used to be
+             inline, and that
              was a mistake: MSI's "Formatted" string type reserves `{`/`}` for
              conditional text blocks and `[...]` for property references, so
              every literal PowerShell brace/bracket in an inline command has
@@ -223,7 +225,7 @@
              this file used to use to smuggle `[#DriverSys]`'s resolved path
              across the immediate/deferred boundary.
 
-             msi-register-driver.ps1 self-heals regardless of *why* the
+             register-driver.ps1 self-heals regardless of *why* the
              service might already be registered — see that file for the
              two cases (same-version REINSTALL/repair vs. a real major
              upgrade) this covers. -->
@@ -232,14 +234,14 @@
                       Execute="deferred"
                       Impersonate="no"
                       Return="check"
-                      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]msi-register-driver.ps1&quot; -SysPath &quot;[INSTALLDIR]WumaDisplayService.sys&quot;" />
+                      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]register-driver.ps1&quot; -SysPath &quot;[INSTALLDIR]WumaDisplayService.sys&quot;" />
 
         <CustomAction Id="UnregisterDriverServiceDeferred"
                       Directory="INSTALLDIR"
                       Execute="deferred"
                       Impersonate="no"
                       Return="ignore"
-                      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]msi-unregister-driver.ps1&quot;" />
+                      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[INSTALLDIR]unregister-driver.ps1&quot;" />
 
         <InstallExecuteSequence>
             <!-- Deferred actions (this one included) can only be scheduled

@@ -5,9 +5,12 @@ on:
     branches:
       - release
 
-# tauri-action을 쓰지 않고 직접 빌드/서명/릴리스한다.
-#   - Windows: EV(SimplySign) 인증서로 signtool 서명이 필요해서 self-hosted 러너에서 빌드한다
-#     (SimplySign CSP는 클라우드 HSM 프록시라 해당 러너에 SimplySign Desktop이 인증되어 있어야 함).
+# tauri-action을 쓰지 않고 직접 빌드/릴리스한다.
+#   - Windows: signtool(Authenticode) 코드 서명은 현재 CI에서 비활성화 — EV(SimplySign)
+#     인증서가 필요한 self-hosted 러너 의존성 없이 빌드하기 위함. 결과물(msi/설치
+#     프로그램)은 코드 서명 없이 나간다. 업데이트 무결성 서명(.sig, tauri signer)은
+#     별개 메커니즘이라 그대로 유지 — 이게 없으면 tauri-plugin-updater 자체가
+#     작동하지 않는다.
 #   - macOS: 기존과 동일하게 ad-hoc 서명, 업데이터 아티팩트 미생성.
 #   - latest.json은 scripts/build-latest-json.mjs로 직접 조립한다 (Windows에만 자동 업데이트 제공).
 
@@ -28,6 +31,11 @@ jobs:
       - name: install bun
         uses: oven-sh/setup-bun@v2
 
+      - name: install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
       - name: install frontend dependencies
         shell: pwsh
         run: bun install
@@ -39,33 +47,41 @@ jobs:
           wix eula accept wix7
           wix extension add WixToolset.UI.wixext -g
 
-      # MSI is packaged directly with WiX v7 (see build-msi.ps1 / sign-msi.ps1 at repo root)
+      # MSI is packaged directly with WiX v7 (see build-msi.ps1 at repo root)
       # instead of tauri-bundler's bundled WiX v3 toolchain. This also builds the app
       # binary + frontend (tauri build --no-bundle) as its first step.
+      # -SkipSign: no signtool/Authenticode signing in CI right now (see the
+      # note at the top of this file) — ships unsigned.
       - name: build MSI (WiX v7)
         shell: pwsh
-        run: ./build-msi.ps1
+        run: ./build-msi.ps1 -SkipSign
 
-      - name: sign MSI (signtool)
+      - name: sign MSI (updater signature only)
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.WUMA_TRACKER_SIGN_SECRET }}
         run: |
           $msi = Get-ChildItem dist/*.msi | Select-Object -First 1 -ExpandProperty FullName
-          ./sign-msi.ps1 -MsiPath $msi
+          bun run tauri signer sign $msi
 
-      - name: build NSIS installer (signed)
+      # The installer's UI is a WPF app (installer/WumaTracker.Setup),
+      # replacing Tauri's own NSIS bundler entirely — see
+      # specs/0005-wpf-installer.md in the wuma-base workspace for why
+      # (nsDialogs couldn't reach the wizard chrome; Tauri's nsis.template
+      # override hits tauri-apps/tauri#10850). -SkipAppBuild because the
+      # MSI step above already built the shared wuma-tracker.exe this reuses
+      # (-SkipSign is implicit there too — nothing signed it in the first place).
+      - name: build installer (WPF)
+        shell: pwsh
+        run: ./build-installer.ps1 -SkipAppBuild -SkipSign
+
+      - name: sign installer (updater signature only)
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.WUMA_TRACKER_SIGN_SECRET }}
-        run: bun run tauri build --bundles nsis
-
-      - name: collect bundle
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          Copy-Item src-tauri/target/release/bundle/nsis/*.exe dist/
-          Copy-Item src-tauri/target/release/bundle/nsis/*.exe.sig dist/
+          $setup = Get-ChildItem dist/*-setup.exe | Select-Object -First 1 -ExpandProperty FullName
+          bun run tauri signer sign $setup
 
       - uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Build-time-only tool: compresses payload files with Brotli before
+       build-installer.ps1 embeds them into WumaTracker.Setup.exe as
+       resources. Not shipped — runs on the dev/CI machine only, so there's
+       no reason to match the installer's own net472 target; whatever SDK
+       is on hand is fine. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BrotliSharpLib" Version="0.3.3" />
+  </ItemGroup>
+
+</Project>

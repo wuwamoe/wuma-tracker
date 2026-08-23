@@ -87,8 +87,8 @@ if (-not (Test-Path $DriverSysPath)) {
     throw "서명된 드라이버를 찾지 못했습니다: $DriverSysPath (Attestation 서명 완료 후 driver/signed/WumaDisplayService.sys로 복사해뒀는지 확인하세요)"
 }
 
-$RegisterDriverScriptPath = Join-Path $DriverDir "scripts\msi-register-driver.ps1"
-$UnregisterDriverScriptPath = Join-Path $DriverDir "scripts\msi-unregister-driver.ps1"
+$RegisterDriverScriptPath = Join-Path $DriverDir "scripts\register-driver.ps1"
+$UnregisterDriverScriptPath = Join-Path $DriverDir "scripts\unregister-driver.ps1"
 
 $MsiPath = Join-Path $OutDir "WumaTracker_${Version}_${Arch}.msi"
 
