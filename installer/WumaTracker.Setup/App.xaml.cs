@@ -165,19 +165,42 @@ public partial class App : Application
             .Equals(Path.GetFullPath(Installer.InstallDir), StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Copies self to %TEMP% and re-runs the actual uninstall there,
+    /// waiting for it to finish instead of firing-and-forgetting it — same
+    /// shape as the NSIS `ExecWait '"$TEMP\uninst.exe" _?=$INSTDIR'` trick
+    /// this replaces. Two things that version got wrong and this fixes:
+    ///   1. UseShellExecute=false (plain CreateProcess) instead of
+    ///      ShellExecuteEx — the child inherits this already-elevated
+    ///      process's token directly, instead of ShellExecuteEx
+    ///      re-evaluating the temp copy's own requireAdministrator manifest
+    ///      and popping a second UAC prompt a user can cancel.
+    ///   2. WaitForExit + propagate the exit code, instead of Shutdown()ing
+    ///      immediately after Process.Start. Programs & Features/the
+    ///      updater only consider this done once THIS process exits — if it
+    ///      exits before the temp copy has actually removed the app, a
+    ///      concurrent operation (e.g. a silent auto-update) can race the
+    ///      temp copy's file/registry writes and leave a mismatched state
+    ///      behind (see Installer.SetupMutexName for the other half of that
+    ///      fix).
+    /// </summary>
     private static void RelaunchFromTempAndExit(string[] args)
     {
         var currentExePath = Installer.CurrentExePath!;
         var tempExePath = Path.Combine(Path.GetTempPath(), $"WumaTracker.Setup.{Guid.NewGuid():N}.exe");
         File.Copy(currentExePath, tempExePath, overwrite: true);
 
-        Process.Start(new ProcessStartInfo
+        using var process = Process.Start(new ProcessStartInfo
         {
             FileName = tempExePath,
             Arguments = string.Join(" ", args),
-            UseShellExecute = true,
-        });
+            UseShellExecute = false,
+        })!;
+        process.WaitForExit();
 
-        Current.Shutdown();
+        // Same reasoning as RunHeadlessAndExit: no window was ever shown
+        // here, so WPF's dispatcher message loop never started — Shutdown()
+        // only makes sense once Run() is actually pumping messages.
+        Environment.Exit(process.ExitCode);
     }
 }

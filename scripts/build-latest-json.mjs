@@ -20,7 +20,14 @@ const releaseUrl = (filename) =>
 
 function sigFor(filename) {
   const sigPath = resolve(bundleDir, `${filename}.sig`);
-  return readFileSync(sigPath).toString('base64');
+  // The .sig file `tauri signer sign` writes is ALREADY the exact string the
+  // updater's `signature` field expects (its bytes, read as text, decode via
+  // one base64 pass into the minisign "untrusted comment: ..." format). Do
+  // NOT base64-encode it again here — that double-encodes it, so the
+  // updater's single base64 decode yields the still-encoded text instead of
+  // the real signature, and verification fails (confirmed against the
+  // published v2.1.0 latest.json).
+  return readFileSync(sigPath, 'utf-8').trim();
 }
 
 const files = readdirSync(bundleDir);

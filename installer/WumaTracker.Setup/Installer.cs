@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.ServiceProcess;
+using System.Threading;
 using Microsoft.Win32;
 
 namespace WumaTracker.Setup;
@@ -46,6 +47,56 @@ public static class Installer
     private const string UninstallKeyPath =
         @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\WumaTracker";
 
+    // Nothing else in this file serializes Run()/Uninstall() against each
+    // other — without this, a background silent auto-update
+    // (tauri-plugin-updater's /S /P /UPDATE, see App.xaml.cs) racing a
+    // manual "제거" from Programs & Features can interleave file/registry
+    // writes from both, e.g. Uninstall() deletes InstallDir and the
+    // registry key right as a concurrent Run() finishes and rewrites the
+    // registry key — leaving a registry entry with no files behind it
+    // (the "찾을 수 없습니다" state a stale UninstallString produces).
+    // "Global\" so a per-user mutex doesn't miss a differently-elevated
+    // instance — this is a perMachine install, only one should ever run.
+    private const string SetupMutexName = @"Global\WumaTracker.Setup.Lock";
+
+    /// <summary>
+    /// Runs <paramref name="work"/> only after acquiring a machine-wide
+    /// mutex, so Run() and Uninstall() never execute concurrently against
+    /// the same InstallDir/registry key (see SetupMutexName). Treats an
+    /// abandoned mutex (a prior instance that crashed mid-install) as
+    /// successfully acquired — its state is exactly what Run()/Uninstall()
+    /// are already built to self-heal (register-driver.ps1, REINSTALLMODE
+    /// "amus"-equivalent overwrite-everything semantics).
+    /// </summary>
+    private static void RunExclusive(Action work)
+    {
+        using var mutex = new Mutex(initiallyOwned: false, name: SetupMutexName);
+        var acquired = false;
+        try
+        {
+            try
+            {
+                acquired = mutex.WaitOne(TimeSpan.FromMinutes(5));
+            }
+            catch (AbandonedMutexException)
+            {
+                acquired = true;
+            }
+
+            if (!acquired)
+            {
+                throw new System.TimeoutException(
+                    "다른 설치/제거 작업이 아직 진행 중입니다. 잠시 후 다시 시도해주세요.");
+            }
+
+            work();
+        }
+        finally
+        {
+            if (acquired) mutex.ReleaseMutex();
+        }
+    }
+
     // Fixed, non-configurable — see specs/0005-wpf-installer.md's "no
     // directory picker" reasoning: a user-changeable path is one more
     // thing the *next* update has to get right.
@@ -56,7 +107,7 @@ public static class Installer
     // Process.MainModule route instead.
     public static string? CurrentExePath => Process.GetCurrentProcess().MainModule?.FileName;
 
-    public static void Run(IProgress<InstallProgress>? progress = null)
+    public static void Run(IProgress<InstallProgress>? progress = null) => RunExclusive(() =>
     {
         progress?.Report(new InstallProgress(5, "실행 중인 프로그램을 종료하는 중..."));
         StopRunningApp();
@@ -101,7 +152,7 @@ public static class Installer
             nonFatal: true);
 
         progress?.Report(new InstallProgress(100, "설치가 완료되었습니다"));
-    }
+    });
 
     /// <summary>
     /// Launches the just-installed app, optionally forwarding whatever
@@ -118,7 +169,7 @@ public static class Installer
         });
     }
 
-    public static void Uninstall(IProgress<InstallProgress>? progress = null)
+    public static void Uninstall(IProgress<InstallProgress>? progress = null) => RunExclusive(() =>
     {
         progress?.Report(new InstallProgress(10, "실행 중인 프로그램을 종료하는 중..."));
         StopRunningApp();
@@ -151,7 +202,7 @@ public static class Installer
         ScheduleSelfDeleteIfRunningFromTemp();
 
         progress?.Report(new InstallProgress(100, "제거가 완료되었습니다"));
-    }
+    });
 
     private static void ScheduleSelfDeleteIfRunningFromTemp()
     {
