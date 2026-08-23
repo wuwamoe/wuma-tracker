@@ -62,6 +62,13 @@ jobs:
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.WUMA_TRACKER_SIGN_SECRET }}
+          # Explicit empty string, not just omitted: tauri-cli's secret_key()
+          # prompts interactively whenever this is unset (even for a
+          # password-less key) — see minisign::SecretKeyBox::into_secret_key.
+          # Hangs forever in non-interactive CI otherwise. Confirmed by
+          # reproducing the hang locally and reading tauri-cli's source
+          # (crates/tauri-cli/src/helpers/updater_signature.rs).
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           $setup = Get-ChildItem dist/*-setup.exe | Select-Object -First 1 -ExpandProperty FullName
           bun run tauri signer sign $setup
