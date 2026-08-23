@@ -76,7 +76,15 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-bundle
-          path: dist/*
+          # dist/* would also sweep up dist/installer-publish/ — the
+          # intermediate `dotnet publish` output dir build-installer.ps1
+          # leaves behind alongside the actual *-setup.exe it copies out of
+          # it. The release job's `gh release upload` chokes trying to
+          # upload a directory as an asset ("is a directory"), so exclude
+          # it here instead of filtering assets later.
+          path: |
+            dist/*
+            !dist/installer-publish/**
           if-no-files-found: error
 
   build-macos:
