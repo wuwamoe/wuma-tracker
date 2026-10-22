@@ -67,7 +67,14 @@
   let connectingExternal = $state(false);
   let startInTray = $state(false);
   let savedGamePath = $state<string | null>(null);
-  let launchArgs = $state(''); // 게임 실행 시 전달할 커스텀 명령 인자 (예: -krqlv=uhd)
+  let launchArgs = $state(''); // 게임 실행 시 전달할 추가 명령 인자
+  let graphicsPreset = $state(''); // -krqlv 그래픽 프리셋 ('' = 미지정)
+  const graphicsPresets = [
+    { value: '', label: '미지정' },
+    { value: 'sd', label: 'SD' },
+    { value: 'hd', label: 'HD' },
+    { value: 'uhd', label: 'UHD' },
+  ];
 
   // 게임 경로 선택 UI 상태
   let showGamePathPicker = $state(false);
@@ -145,6 +152,7 @@
         startInTray = config.startInTray ?? false;
         savedGamePath = config.gamePath ?? null;
         launchArgs = config.launchArgs ?? '';
+        graphicsPreset = config.graphicsPreset ?? '';
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -320,6 +328,7 @@
         startInTray,
         gamePath: path,
         launchArgs,
+        graphicsPreset: graphicsPreset || null,
       });
       savedGamePath = path;
       toast.success('게임 경로가 저장되었습니다.');
@@ -340,6 +349,7 @@
         startInTray: startInTray,
         gamePath: savedGamePath,
         launchArgs: launchArgs,
+        graphicsPreset: graphicsPreset || null,
       });
       await invoke('restart_server');
     };
@@ -566,10 +576,28 @@
           </div>
 
           <div class="space-y-2 pt-3">
-            <Label for="launch-args" class="text-sm font-medium">실행 인자 (선택)</Label>
-            <Input id="launch-args" bind:value={launchArgs} placeholder="예: -krqlv=uhd" />
+            <Label class="text-sm font-medium">그래픽 프리셋</Label>
+            <RadioGroup bind:value={graphicsPreset} class="grid grid-cols-4 gap-2">
+              {#each graphicsPresets as preset}
+                <label
+                  for="preset-{preset.value || 'none'}"
+                  class="flex items-center justify-center gap-2 rounded-md border px-2 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent {graphicsPreset === preset.value ? 'border-primary bg-primary/5' : 'border-border'}"
+                >
+                  <RadioGroupItem value={preset.value} id="preset-{preset.value || 'none'}" />
+                  {preset.label}
+                </label>
+              {/each}
+            </RadioGroup>
             <p class="text-xs text-muted-foreground">
-              게임을 실행할 때 전달할 명령 인자입니다. 그래픽 프리셋은 -krqlv=sd / hd / uhd 로 지정할 수 있습니다. 비워두면 인자 없이 실행됩니다.
+              게임 실행 시 -krqlv 인자로 전달됩니다. 게임에서 쓰는 그래픽 프리셋과 맞춰주세요.
+            </p>
+          </div>
+
+          <div class="space-y-2 pt-3">
+            <Label for="launch-args" class="text-sm font-medium">추가 실행 인자 (선택)</Label>
+            <Input id="launch-args" bind:value={launchArgs} placeholder="공백으로 구분" />
+            <p class="text-xs text-muted-foreground">
+              게임 실행 시 함께 전달할 명령 인자입니다. 비워두면 추가 인자 없이 실행됩니다.
             </p>
           </div>
 

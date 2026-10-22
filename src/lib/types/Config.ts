@@ -6,4 +6,5 @@ export default interface AppConfig {
   startInTray?: boolean;
   gamePath?: string;
   launchArgs?: string;
+  graphicsPreset?: string;
 }

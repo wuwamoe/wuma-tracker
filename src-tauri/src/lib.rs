@@ -36,6 +36,8 @@ use windows::core::AgileReference;
 
 #[cfg(windows)]
 const GAME_PROCESS_NAME: &str = "Client-Win64-Shipping.exe";
+/// `-krqlv=` 그래픽 프리셋으로 허용되는 값.
+const GRAPHICS_PRESETS: [&str; 3] = ["sd", "hd", "uhd"];
 #[cfg(target_os = "macos")]
 const GAME_PROCESS_NAME: &str = "Client-Mac-Shipping";
 
@@ -80,6 +82,7 @@ async fn write_config(
     start_in_tray: Option<bool>,
     game_path: Option<String>,
     launch_args: Option<String>,
+    graphics_preset: Option<String>,
 ) -> Result<(), String> {
     let Ok(_) = util::write_config(
         app_handle,
@@ -91,6 +94,7 @@ async fn write_config(
             start_in_tray,
             game_path,
             launch_args,
+            graphics_preset,
         },
     )
     .await
@@ -109,10 +113,22 @@ async fn scan_game_candidates() -> Vec<String> {
 
 #[tauri::command]
 async fn launch_and_attach(app_handle: AppHandle, path: String) -> Result<(), String> {
-    // 저장된 설정에서 커스텀 실행 인자를 읽어 실행에 사용한다. 설정이 없으면 인자 없이 실행.
+    // 저장된 설정에서 그래픽 프리셋과 커스텀 실행 인자를 읽어 실행에 사용한다.
+    // 프리셋은 `-krqlv=<preset>`으로 앞에 붙이고, 둘 다 없으면 인자 없이 실행.
     let mut launch_args = None;
     if let Ok(config) = util::get_config(app_handle.clone()).await {
-        launch_args = config.launch_args.clone();
+        let preset_arg = config
+            .graphics_preset
+            .as_deref()
+            .filter(|p| GRAPHICS_PRESETS.contains(p))
+            .map(|p| format!("-krqlv={}", p));
+        let joined = [preset_arg, config.launch_args.clone()]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        launch_args = (!joined.is_empty()).then_some(joined);
         let _ = util::write_config(
             app_handle.clone(),
             LocalStorageConfig { game_path: Some(path.clone()), ..config },

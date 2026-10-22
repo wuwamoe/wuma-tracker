@@ -56,6 +56,7 @@ pub struct LocalStorageConfig {
     pub start_in_tray: Option<bool>,
     pub game_path: Option<String>,
     pub launch_args: Option<String>,
+    pub graphics_preset: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -168,6 +169,7 @@ impl Default for LocalStorageConfig {
             start_in_tray: None,
             game_path: None,
             launch_args: None,
+            graphics_preset: None,
         }
     }
 }
