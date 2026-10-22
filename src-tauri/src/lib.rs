@@ -79,6 +79,7 @@ async fn write_config(
     auto_attach_enabled: Option<bool>,
     start_in_tray: Option<bool>,
     game_path: Option<String>,
+    launch_args: Option<String>,
 ) -> Result<(), String> {
     let Ok(_) = util::write_config(
         app_handle,
@@ -89,6 +90,7 @@ async fn write_config(
             auto_attach_enabled,
             start_in_tray,
             game_path,
+            launch_args,
         },
     )
     .await
@@ -107,7 +109,10 @@ async fn scan_game_candidates() -> Vec<String> {
 
 #[tauri::command]
 async fn launch_and_attach(app_handle: AppHandle, path: String) -> Result<(), String> {
+    // 저장된 설정에서 커스텀 실행 인자를 읽어 실행에 사용한다. 설정이 없으면 인자 없이 실행.
+    let mut launch_args = None;
     if let Ok(config) = util::get_config(app_handle.clone()).await {
+        launch_args = config.launch_args.clone();
         let _ = util::write_config(
             app_handle.clone(),
             LocalStorageConfig { game_path: Some(path.clone()), ..config },
@@ -119,7 +124,7 @@ async fn launch_and_attach(app_handle: AppHandle, path: String) -> Result<(), St
     let (resp_tx, resp_rx) = oneshot::channel();
     state
         .supervisor_tx
-        .send(SupervisorCommand::LaunchAndAttach(path, resp_tx))
+        .send(SupervisorCommand::LaunchAndAttach(path, launch_args, resp_tx))
         .await
         .map_err(|e| format!("앱 내부 오류: {}", e))?;
 

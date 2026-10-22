@@ -55,6 +55,7 @@ pub struct LocalStorageConfig {
     pub auto_attach_enabled: Option<bool>,
     pub start_in_tray: Option<bool>,
     pub game_path: Option<String>,
+    pub launch_args: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -127,7 +128,7 @@ pub enum CollectorMessage {
 #[derive(Debug)]
 pub enum SupervisorCommand {
     AttachProcess(String, oneshot::Sender<Result<(), String>>),
-    LaunchAndAttach(String, oneshot::Sender<Result<(), String>>),
+    LaunchAndAttach(String, Option<String>, oneshot::Sender<Result<(), String>>),
     RestartSignalingServer,
     RestartExternalConnection(oneshot::Sender<Result<String, String>>),
 }
@@ -166,6 +167,7 @@ impl Default for LocalStorageConfig {
             auto_attach_enabled: None,
             start_in_tray: None,
             game_path: None,
+            launch_args: None,
         }
     }
 }

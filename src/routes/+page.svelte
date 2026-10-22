@@ -35,6 +35,7 @@
   import { checkUpdates } from '$lib/utils';
   import type GlobalState from '@/types/GlobalState';
   import { Checkbox } from '@/components/ui/checkbox';
+  import { Input } from '@/components/ui/input';
   import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
   import {
     Dialog,
@@ -66,6 +67,7 @@
   let connectingExternal = $state(false);
   let startInTray = $state(false);
   let savedGamePath = $state<string | null>(null);
+  let launchArgs = $state(''); // 게임 실행 시 전달할 커스텀 명령 인자 (예: -krqlv=uhd)
 
   // 게임 경로 선택 UI 상태
   let showGamePathPicker = $state(false);
@@ -142,6 +144,7 @@
         autoAttachEnabled = config.autoAttachEnabled ?? false;
         startInTray = config.startInTray ?? false;
         savedGamePath = config.gamePath ?? null;
+        launchArgs = config.launchArgs ?? '';
       })
       .catch((err) => {
         console.error('Failed to load config:', err);
@@ -316,6 +319,7 @@
         autoAttachEnabled,
         startInTray,
         gamePath: path,
+        launchArgs,
       });
       savedGamePath = path;
       toast.success('게임 경로가 저장되었습니다.');
@@ -335,6 +339,7 @@
         autoAttachEnabled: autoAttachEnabled,
         startInTray: startInTray,
         gamePath: savedGamePath,
+        launchArgs: launchArgs,
       });
       await invoke('restart_server');
     };
@@ -558,6 +563,14 @@
               <IconFolder class="mr-2 h-4 w-4" />
               경로 {savedGamePath ? '변경' : '설정'}
             </Button>
+          </div>
+
+          <div class="space-y-2 pt-3">
+            <Label for="launch-args" class="text-sm font-medium">실행 인자 (선택)</Label>
+            <Input id="launch-args" bind:value={launchArgs} placeholder="예: -krqlv=uhd" />
+            <p class="text-xs text-muted-foreground">
+              게임을 실행할 때 전달할 명령 인자입니다. 그래픽 프리셋은 -krqlv=sd / hd / uhd 로 지정할 수 있습니다. 비워두면 인자 없이 실행됩니다.
+            </p>
           </div>
 
           <Button onclick={applyAndRestart} class="w-full mt-4">

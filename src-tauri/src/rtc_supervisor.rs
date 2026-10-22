@@ -165,8 +165,8 @@ impl RtcSupervisor {
                             let result = self.attach_process(app_handle.clone(), &proc_name).await;
                             let _ = responder.send(result);
                         }
-                        SupervisorCommand::LaunchAndAttach(path, responder) => {
-                            let result = self.do_launch_and_attach(app_handle.clone(), &path).await;
+                        SupervisorCommand::LaunchAndAttach(path, args, responder) => {
+                            let result = self.do_launch_and_attach(app_handle.clone(), &path, args.as_deref()).await;
                             let _ = responder.send(result);
                         }
                         SupervisorCommand::RestartSignalingServer => {
@@ -214,12 +214,12 @@ impl RtcSupervisor {
     /// 게임을 실행한 뒤 이름 기반으로 붙는다. 프로세스 핸들을 직접 넘겨받는 대신
     /// `attach_process`와 동일한 경로를 재사용하되, 막 실행된 프로세스가 모듈을 로드할
     /// 시간을 벌기 위해 짧은 간격으로 재시도한다. 백엔드(드라이버/RPM)에 무관하게 동작한다.
-    pub async fn do_launch_and_attach(&mut self, app_handle: AppHandle, path: &str) -> Result<(), String> {
+    pub async fn do_launch_and_attach(&mut self, app_handle: AppHandle, path: &str, args: Option<&str>) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
             // macOS는 번들(.app) 경로와 내부 실행 파일 이름이 다를 수 있어
             // 이름 기반 자동 연결을 시도하지 않는다 (기존 동작 유지: 실행만 함).
-            return crate::game_launcher::spawn_game(path).map_err(|e| e.to_string());
+            return crate::game_launcher::spawn_game(path, args).map_err(|e| e.to_string());
         }
 
         #[cfg(windows)]
@@ -228,7 +228,7 @@ impl RtcSupervisor {
                 self.detach_process().await;
             }
 
-            crate::game_launcher::spawn_game(path).map_err(|e| e.to_string())?;
+            crate::game_launcher::spawn_game(path, args).map_err(|e| e.to_string())?;
 
             let proc_name = std::path::Path::new(path)
                 .file_name()

@@ -5,4 +5,5 @@ export default interface AppConfig {
   autoAttachEnabled?: boolean;
   startInTray?: boolean;
   gamePath?: string;
+  launchArgs?: string;
 }
