@@ -1,0 +1,60 @@
+name: "macos-attach"
+
+# Builds only the macOS dmg and attaches it to an EXISTING release.
+#
+# For releases whose Windows side was built and EV-signed locally (Certum
+# EV via SimplySign isn't available on CI runners). Leaves the release's
+# other assets, notes, and draft/pre-release state untouched — unlike
+# main.yml, which rebuilds Windows unsigned and clobbers it.
+#
+# macOS is ad-hoc signed, no updater artifacts — same as main.yml's
+# build-macos job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach the dmg to (e.g. v2.2.0)"
+        required: true
+
+jobs:
+  build-and-attach:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: "aarch64-apple-darwin,x86_64-apple-darwin"
+
+      - name: install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: install frontend dependencies
+        run: bun install
+
+      - name: build (ad-hoc signed, no updater artifacts)
+        run: >-
+          bun run tauri build
+          --target universal-apple-darwin
+          --bundles dmg
+          --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+
+      - name: attach dmg to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          gh release upload "$TAG" src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg \
+            --repo "${{ github.repository }}" --clobber
