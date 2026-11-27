@@ -12,6 +12,9 @@ const fn ctl(function: u32) -> u32 {
 
 pub const IOCTL_GET_LOCATION: u32 = ctl(0x802);
 
+/// Size of `GetLocationResponse::world_name`.
+pub const WORLD_NAME_LEN: usize = 64;
+
 #[repr(C)]
 pub struct GetLocationRequest;
 
@@ -25,4 +28,9 @@ pub struct GetLocationResponse {
     pub roll: f32,
     pub stage: u8,
     pub _pad: [u8; 3],
+    /// Short name of the loaded world, e.g. `AkiWorld_WP`: the last segment of
+    /// the game's map path. NUL-padded ASCII, at most `WORLD_NAME_LEN - 1`
+    /// characters. All zero when it couldn't be read; the coordinates are
+    /// still valid then.
+    pub world_name: [u8; WORLD_NAME_LEN],
 }

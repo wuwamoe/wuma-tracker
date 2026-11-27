@@ -64,7 +64,8 @@ The driver exposes exactly one IOCTL:
 
 - `IOCTL_GET_LOCATION` — defined once in `driver/shared/ioctls.rs`, the sole
   source of truth for the on-wire ABI. Takes no request payload; returns a
-  fixed `GetLocationResponse` struct (`x, y, z, pitch, yaw, roll, stage`).
+  fixed `GetLocationResponse` struct (`x, y, z, pitch, yaw, roll, stage,
+  world_name`).
 
 There is no `IOCTL_AUTH`, `IOCTL_SET_CONFIG`, or `IOCTL_PATTERN_SEARCH` in the
 final driver.

@@ -15,9 +15,10 @@ mergeable.
 - [ ] **No generic memory read/write.** `driver/src/main.rs` has no IOCTL or
       internal path that reads or writes an address supplied by a caller.
       `kread`/`kread_ptr` are only ever called with addresses derived from
-      `PLAYER_COORD_CONFIG` or the internally-discovered world anchor.
-- [ ] **No caller-supplied or generic pattern scan.** `find_hardcoded_world_anchor`
-      only searches for `WORLD_ANCHOR_PATTERN_PREFIX`/`WORLD_ANCHOR_PATTERN_SUFFIX`, both
+      `PLAYER_COORD_CONFIG`, the internally-discovered world anchor, or the
+      internally-discovered name pool.
+- [ ] **No caller-supplied or generic pattern scan.** `find_hardcoded_anchor`
+      only searches for `WORLD_ANCHOR_PATTERN` and `NAME_POOL_PATTERN`, both
       compile-time constants. No IOCTL accepts prefix/suffix bytes, a scan
       range, or a target process from a caller.
 - [ ] **No runtime config.** There is no mutable global session/config state

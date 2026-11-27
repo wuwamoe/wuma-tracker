@@ -39,7 +39,7 @@ use wdk_sys::{
 
 #[used]
 #[link_section = ".rdata"]
-static WUMATRACKER_PURPOSE: &str = "WumaTracker Player Position Service; reads only player world coordinates for the legitimate WumaTracker overlay service; no write, no generic pattern scan, no generic memory access, no runtime configuration.";
+static WUMATRACKER_PURPOSE: &str = "WumaTracker Player Position Service; reads only player world coordinates and the loaded map's name for the legitimate WumaTracker overlay service; no write, no generic pattern scan, no generic memory access, no runtime configuration.";
 
 const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
@@ -98,7 +98,7 @@ const DRV_DEVICE_OBJECT: usize = 0x08;
 const DRV_UNLOAD: usize = 0x68;
 const DRV_MAJOR_FUNCTION: usize = 0x70;
 
-use ioctls::{IOCTL_GET_LOCATION, APP_PROCESS_NAME};
+use ioctls::{IOCTL_GET_LOCATION, APP_PROCESS_NAME, WORLD_NAME_LEN};
 
 /// Converts an ASCII `&str` to a fixed-size byte prefix at compile time, so
 /// `APP_NAME_PREFIX` below is generated from `ioctls::APP_PROCESS_NAME`
@@ -132,8 +132,43 @@ static DEVICE_OWNER_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::Ato
 
 const USER_MIN: u64 = 0x1_0000;
 const USER_MAX: u64 = 0x7FFF_FFFF_FFFF;
-const WORLD_ANCHOR_PATTERN_PREFIX: &[u8] = &[0x48, 0x8B, 0x1D];
-const WORLD_ANCHOR_PATTERN_SUFFIX: &[u8] = &[0x48, 0x85, 0xDB, 0x74, 0xFF, 0x41, 0xB0, 0x01];
+
+/// A `<prefix> disp32 <suffix>` instruction whose rip-relative `disp32`
+/// resolves to a static in the game image. `0xFF` in `suffix` is a wildcard.
+struct AnchorPattern {
+    prefix: &'static [u8],
+    suffix: &'static [u8],
+}
+
+// `mov rbx, [rip+GWorld]; test rbx, rbx; jz ..; mov r8b, 1`
+const WORLD_ANCHOR_PATTERN: AnchorPattern = AnchorPattern {
+    prefix: &[0x48, 0x8B, 0x1D],
+    suffix: &[0x48, 0x85, 0xDB, 0x74, 0xFF, 0x41, 0xB0, 0x01],
+};
+
+// The inlined lazy FNamePool getter: `lea rcx, [rip+NamePoolData]; call
+// FNamePool::FNamePool; mov r8, rax; mov byte [rip+bNamePoolInitialized], 1`.
+// Every match in the image resolves to the same pool.
+const NAME_POOL_PATTERN: AnchorPattern = AnchorPattern {
+    prefix: &[0x48, 0x8D, 0x0D],
+    suffix: &[0xE8, 0xFF, 0xFF, 0xFF, 0xFF, 0x4C, 0x8B, 0xC0, 0xC6, 0x05, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+};
+
+// Reading the loaded world's short name (e.g. `AkiWorld_WP`) from the UWorld's
+// own FName. Layout taken from this build's `FName::AppendString`, which
+// differs from stock UE 4.26 in the entry header:
+//   UObject::NamePrivate.DisplayIndex @0x1C (FName is 0xC: Comparison,
+//   Display, Number — a case-preserving build)
+//   FNamePool::Blocks @0x10, 8192 blocks; block = index >> 16
+//   entry = Blocks[block] + (index & 0xFFFF) * 4
+//   entry +4: u16 header, bit 0 = wide, length = header >> 1 (no probe hash)
+//   entry +6: characters
+const UOBJECT_NAME_DISPLAY_INDEX: u64 = 0x1C;
+const NAME_POOL_BLOCKS: u64 = 0x10;
+const NAME_POOL_MAX_BLOCKS: u32 = 8192;
+const NAME_ENTRY_STRIDE: u64 = 4;
+const NAME_ENTRY_HEADER: u64 = 4;
+const NAME_ENTRY_CHARS: u64 = 6;
 
 /// Converts an ASCII `&str` to a fixed-size UTF-16 array at compile time, so
 /// `TARGET_PROCESS_NAME_UTF16` below is generated from `ioctls::TARGET_PROCESS_NAME`
@@ -606,6 +641,7 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
         roll: 0.0,
         stage: 0,
         _pad: [0; 3],
+        world_name: [0; WORLD_NAME_LEN],
     };
 
     let Some(proc) = find_target_process_cached() else {
@@ -613,7 +649,7 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
         return (STATUS_SUCCESS, core::mem::size_of::<GetLocationResponse>());
     };
 
-    let result = read_player_world_position(proc);
+    let result = read_player_world_position(proc, &mut r.world_name);
     ObDereferenceObjectDeferDelete(proc as PVOID);
 
     // A cache hit only re-validates the PID lookup + truncated image name,
@@ -626,6 +662,7 @@ unsafe fn on_get_location(buf: *mut u8, ilen: usize, olen: usize) -> (NTSTATUS, 
     if result == Err(1) {
         CACHED_PID.store(0, core::sync::atomic::Ordering::Relaxed);
         CACHED_WORLD_ANCHOR_RVA.store(0, core::sync::atomic::Ordering::Relaxed);
+        CACHED_NAME_POOL_RVA.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     match result {
@@ -683,6 +720,11 @@ const SPI_UNIQUE_PROCESS_ID: usize = 0x50;
 // full rescan on that same call and refreshes the cache.
 static CACHED_PID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static CACHED_WORLD_ANCHOR_RVA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+// 0 = not scanned yet for this process. NAME_POOL_NOT_FOUND = scanned and
+// missed: the name is optional, so a miss must not cost a full scan on every
+// poll. Cleared with the other caches when the process goes away.
+static CACHED_NAME_POOL_RVA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+const NAME_POOL_NOT_FOUND: u64 = u64::MAX;
 
 // First 14 bytes of "Client-Win64-Shipping.exe" — EPROCESS::ImageFileName is
 // a fixed UCHAR[15] (truncated basename, not guaranteed NUL-terminated for
@@ -749,10 +791,28 @@ unsafe fn resolve_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
             return Some(anchor);
         }
     }
-    let rva = find_hardcoded_world_anchor(proc, base)?;
+    let rva = find_hardcoded_anchor(proc, base, &WORLD_ANCHOR_PATTERN)?;
     let anchor = kread_ptr(proc, base + rva)?;
     CACHED_WORLD_ANCHOR_RVA.store(rva, core::sync::atomic::Ordering::Relaxed);
     Some(anchor)
+}
+
+/// Cache-aware FNamePool resolution. The pool is a static in the image, so
+/// its address is `base + rva` — no pointer read. Must be called before
+/// attaching: the cache-miss scan does its own attaches.
+unsafe fn resolve_name_pool(proc: PEPROCESS, base: u64) -> Option<u64> {
+    match CACHED_NAME_POOL_RVA.load(core::sync::atomic::Ordering::Relaxed) {
+        NAME_POOL_NOT_FOUND => None,
+        0 => {
+            let rva = find_hardcoded_anchor(proc, base, &NAME_POOL_PATTERN);
+            CACHED_NAME_POOL_RVA.store(
+                rva.unwrap_or(NAME_POOL_NOT_FOUND),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            rva.map(|rva| base + rva)
+        }
+        rva => Some(base + rva),
+    }
 }
 
 unsafe fn find_target_process() -> Option<PEPROCESS> {
@@ -911,19 +971,23 @@ const fn to_ascii_lower_u16(ch: u16) -> u16 {
     }
 }
 
+/// Also copies the loaded world's short name into `world_name` when it can be
+/// read; a failed name read leaves it zeroed and does not fail the call.
 unsafe fn read_player_world_position(
     proc: PEPROCESS,
+    world_name: &mut [u8; WORLD_NAME_LEN],
 ) -> Result<(f32, f32, f32, f32, f32, f32), u8> {
     let base = read_main_module_base(proc).ok_or(1u8)?;
     let anchor = resolve_world_anchor(proc, base).ok_or(1u8)?;
+    let name_pool = resolve_name_pool(proc, base);
 
     // Single attach spans the rest of this function (chain walk + transform +
-    // world origin — up to 9 separate reads) instead of attaching/detaching
-    // per read. World-anchor resolution above keeps its own one-shot
-    // attach(es) via kread/kread_ptr (resolve_world_anchor's cache-miss path
-    // calls find_hardcoded_world_anchor, a rare/slow pattern scan where one
-    // more attach doesn't matter — not worth the complexity of folding it
-    // into this guard too).
+    // world origin + world name — up to 13 separate reads) instead of
+    // attaching/detaching per read. Anchor and name-pool resolution above keep
+    // their own one-shot attach(es) via kread/kread_ptr (their cache-miss paths
+    // call find_hardcoded_anchor, a rare/slow pattern scan where one more
+    // attach doesn't matter — not worth the complexity of folding it into this
+    // guard too).
     let _guard = AttachGuard::new(proc);
 
     let mut ptr = anchor;
@@ -966,6 +1030,10 @@ unsafe fn read_player_world_position(
         FIntVector { x: 0, y: 0, z: 0 }
     };
 
+    if let Some(name_pool) = name_pool {
+        read_world_name(anchor, name_pool, world_name);
+    }
+
     Ok((
         xf.lx + iv.x as f32,
         xf.ly + iv.y as f32,
@@ -974,6 +1042,41 @@ unsafe fn read_player_world_position(
         yaw,
         roll,
     ))
+}
+
+/// Copies the UWorld's own FName (e.g. `AkiWorld_WP`) into `out`, NUL-padded.
+/// Leaves `out` untouched if a read fails or the entry isn't a printable ANSI
+/// name shorter than `out`. A long name is dropped rather than truncated: a
+/// truncated name could match a different map. Caller must be attached.
+unsafe fn read_world_name(world: u64, name_pool: u64, out: &mut [u8; WORLD_NAME_LEN]) {
+    let mut index = 0u32;
+    if !kread_raw(world + UOBJECT_NAME_DISPLAY_INDEX, &mut index as *mut u32 as *mut u8, 4) {
+        return;
+    }
+    let block = index >> 16;
+    if block >= NAME_POOL_MAX_BLOCKS {
+        return;
+    }
+    let Some(block_base) = kread_ptr_raw(name_pool + NAME_POOL_BLOCKS + block as u64 * 8) else {
+        return;
+    };
+    let entry = block_base + (index & 0xFFFF) as u64 * NAME_ENTRY_STRIDE;
+    let mut header = 0u16;
+    if !kread_raw(entry + NAME_ENTRY_HEADER, &mut header as *mut u16 as *mut u8, 2) {
+        return;
+    }
+    let len = (header >> 1) as usize;
+    if header & 1 != 0 || len == 0 || len >= WORLD_NAME_LEN {
+        return;
+    }
+    let mut name = [0u8; WORLD_NAME_LEN];
+    if !kread_raw(entry + NAME_ENTRY_CHARS, name.as_mut_ptr(), len) {
+        return;
+    }
+    if !name[..len].iter().all(|c| c.is_ascii_graphic()) {
+        return;
+    }
+    *out = name;
 }
 
 unsafe fn read_main_module_base(proc: PEPROCESS) -> Option<u64> {
@@ -1001,7 +1104,7 @@ fn quat_to_euler(x: f32, y: f32, z: f32, w: f32) -> (f32, f32, f32) {
     (roll * 180.0 / PI, pitch * 180.0 / PI, yaw * 180.0 / PI)
 }
 
-unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64> {
+unsafe fn find_hardcoded_anchor(proc: PEPROCESS, base: u64, pattern: &AnchorPattern) -> Option<u64> {
     const BATCH_GAP: u64 = 4096;
     const HEADER_READ: usize = 4096;
     const MAX_BATCH: usize = 512 * 1024;
@@ -1069,8 +1172,8 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
         return None;
     }
 
-    let instruction_len = WORLD_ANCHOR_PATTERN_PREFIX.len() + 4;
-    let pattern_len = instruction_len + WORLD_ANCHOR_PATTERN_SUFFIX.len();
+    let instruction_len = pattern.prefix.len() + 4;
+    let pattern_len = instruction_len + pattern.suffix.len();
     let mut result = None;
     let mut entry_off = 0usize;
 
@@ -1130,22 +1233,22 @@ unsafe fn find_hardcoded_world_anchor(proc: PEPROCESS, base: u64) -> Option<u64>
             if read_size >= pattern_len && kread(proc, base + batch_start, sb, read_size) {
                 let scan = core::slice::from_raw_parts(sb, read_size);
                 'scan: for off in 0..read_size - pattern_len + 1 {
-                    if scan[off..off + WORLD_ANCHOR_PATTERN_PREFIX.len()] != *WORLD_ANCHOR_PATTERN_PREFIX {
+                    if scan[off..off + pattern.prefix.len()] != *pattern.prefix {
                         continue;
                     }
-                    for (k, &v) in WORLD_ANCHOR_PATTERN_SUFFIX.iter().enumerate() {
+                    for (k, &v) in pattern.suffix.iter().enumerate() {
                         if v != 0xFF && scan[off + instruction_len + k] != v {
                             continue 'scan;
                         }
                     }
 
-                    let Some(disp) = read_i32(scan, off + WORLD_ANCHOR_PATTERN_PREFIX.len()) else {
+                    let Some(disp) = read_i32(scan, off + pattern.prefix.len()) else {
                         continue;
                     };
                     let instr_rva = batch_start + off as u64;
-                    let world_anchor_rva = ((instr_rva as i64) + instruction_len as i64 + disp as i64) as u64;
-                    if world_anchor_rva > 0 && world_anchor_rva < soi as u64 {
-                        result = Some(world_anchor_rva);
+                    let anchor_rva = ((instr_rva as i64) + instruction_len as i64 + disp as i64) as u64;
+                    if anchor_rva > 0 && anchor_rva < soi as u64 {
+                        result = Some(anchor_rva);
                         break 'windows;
                     }
                 }

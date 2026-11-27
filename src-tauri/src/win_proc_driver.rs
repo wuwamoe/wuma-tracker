@@ -36,7 +36,7 @@ use crate::types::NativeError;
 
 #[path = "../../driver/shared/ioctls.rs"]
 mod ioctls;
-use ioctls::{GetLocationResponse, DEVICE_NAME, IOCTL_GET_LOCATION};
+use ioctls::{GetLocationResponse, DEVICE_NAME, IOCTL_GET_LOCATION, WORLD_NAME_LEN};
 
 const STAGE_DRIVER_UNAVAILABLE: u8 = 0xFF;
 const STAGE_TARGET_MISSING: u8 = 0xFE;
@@ -87,6 +87,7 @@ fn call_driver_get_location() -> Result<crate::types::PlayerInfo, NativeError> {
         roll: 0.0,
         stage: 0,
         _pad: [0; 3],
+        world_name: [0; WORLD_NAME_LEN],
     };
     let mut returned: u32 = 0;
 
@@ -122,6 +123,13 @@ fn call_driver_get_location() -> Result<crate::types::PlayerInfo, NativeError> {
         });
     }
 
+    // 드라이버가 NUL로 채운 ASCII만 넣어 준다. 비어 있으면 이름을 못 읽은 것이고, 좌표는 그대로 유효하다.
+    let name_len = resp.world_name.iter().position(|&c| c == 0).unwrap_or(WORLD_NAME_LEN);
+    let world = std::str::from_utf8(&resp.world_name[..name_len])
+        .ok()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+
     Ok(crate::types::PlayerInfo {
         x: resp.x,
         y: resp.y,
@@ -129,6 +137,7 @@ fn call_driver_get_location() -> Result<crate::types::PlayerInfo, NativeError> {
         pitch: resp.pitch,
         yaw: resp.yaw,
         roll: resp.roll,
+        world,
     })
 }
 

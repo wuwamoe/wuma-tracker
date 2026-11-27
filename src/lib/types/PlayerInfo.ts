@@ -5,4 +5,6 @@ export default interface PlayerInfo {
   pitch: number,
   yaw: number,
   roll: number,
+  /** Loaded world's short name (e.g. `AkiWorld_WP`); absent when unknown. */
+  world?: string,
 }

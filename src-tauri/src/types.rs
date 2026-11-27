@@ -12,8 +12,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-#[repr(C)]
-#[derive(Copy, Clone, serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct PlayerInfo {
     pub x: f32,
     pub y: f32,
@@ -21,6 +20,10 @@ pub struct PlayerInfo {
     pub pitch: f32,
     pub yaw: f32,
     pub roll: f32,
+    /// 로드된 월드의 짧은 이름(예: `AkiWorld_WP`). 맵 id로의 매핑은 wuwa-maps가 한다.
+    /// 읽지 못했거나 이를 제공하지 않는 백엔드(macOS)에서는 `None`이고 JSON에서 빠진다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world: Option<String>,
 }
 
 #[repr(C)]

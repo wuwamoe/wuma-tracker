@@ -83,6 +83,7 @@ pub fn walk_pointer_chain(
         pitch,
         yaw,
         roll,
+        world: None,
     })
 }
 
