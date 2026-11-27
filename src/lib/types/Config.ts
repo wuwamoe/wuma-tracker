@@ -7,4 +7,5 @@ export default interface AppConfig {
   gamePath?: string;
   launchArgs?: string;
   graphicsPreset?: string;
+  exitWithGame?: boolean;
 }

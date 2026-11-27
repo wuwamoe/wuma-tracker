@@ -60,6 +60,8 @@ pub struct LocalStorageConfig {
     pub game_path: Option<String>,
     pub launch_args: Option<String>,
     pub graphics_preset: Option<String>,
+    /// 연결된 게임이 종료되면 트래커도 함께 종료한다 (기본: 꺼짐).
+    pub exit_with_game: Option<bool>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -173,6 +175,7 @@ impl Default for LocalStorageConfig {
             game_path: None,
             launch_args: None,
             graphics_preset: None,
+            exit_with_game: None,
         }
     }
 }

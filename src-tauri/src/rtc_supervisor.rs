@@ -123,6 +123,17 @@ impl RtcSupervisor {
                             log::error!("Process terminated. Detaching...");
                             self.detach_process().await;
                             util::mutate_global_state(&app_handle, |s| s.proc_state = 0);
+                            // "게임 종료 시 트래커도 종료": 트레이 메뉴 "종료"와 같은 경로로
+                            // 나가므로 run_return 이후의 드라이버 정지/정리도 그대로 탄다.
+                            let exit_with_game = util::get_config(app_handle.clone())
+                                .await
+                                .ok()
+                                .and_then(|c| c.exit_with_game)
+                                .unwrap_or(false);
+                            if exit_with_game {
+                                log::info!("Game exited; exiting tracker (exitWithGame).");
+                                app_handle.exit(0);
+                            }
                         }
                         CollectorMessage::TemporalError(e) => {
                             if let Err(e) = app_handle.emit("handle-tracker-error", e.clone()) {

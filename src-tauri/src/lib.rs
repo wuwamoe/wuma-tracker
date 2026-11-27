@@ -83,6 +83,7 @@ async fn write_config(
     game_path: Option<String>,
     launch_args: Option<String>,
     graphics_preset: Option<String>,
+    exit_with_game: Option<bool>,
 ) -> Result<(), String> {
     let Ok(_) = util::write_config(
         app_handle,
@@ -95,6 +96,7 @@ async fn write_config(
             game_path,
             launch_args,
             graphics_preset,
+            exit_with_game,
         },
     )
     .await

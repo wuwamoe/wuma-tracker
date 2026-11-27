@@ -66,6 +66,7 @@
   let autoAttachEnabled = $state(false);
   let connectingExternal = $state(false);
   let startInTray = $state(false);
+  let exitWithGame = $state(false); // 연결된 게임이 종료되면 트래커도 종료
   let savedGamePath = $state<string | null>(null);
   let launchArgs = $state(''); // 게임 실행 시 전달할 추가 명령 인자
   let graphicsPreset = $state(''); // -krqlv 그래픽 프리셋 ('' = 미지정)
@@ -150,6 +151,7 @@
       .then((config) => {
         autoAttachEnabled = config.autoAttachEnabled ?? false;
         startInTray = config.startInTray ?? false;
+        exitWithGame = config.exitWithGame ?? false;
         savedGamePath = config.gamePath ?? null;
         launchArgs = config.launchArgs ?? '';
         graphicsPreset = config.graphicsPreset ?? '';
@@ -329,6 +331,7 @@
         gamePath: path,
         launchArgs,
         graphicsPreset: graphicsPreset || null,
+        exitWithGame,
       });
       savedGamePath = path;
       toast.success('게임 경로가 저장되었습니다.');
@@ -350,6 +353,7 @@
         gamePath: savedGamePath,
         launchArgs: launchArgs,
         graphicsPreset: graphicsPreset || null,
+        exitWithGame,
       });
       await invoke('restart_server');
     };
@@ -553,6 +557,13 @@
             <Checkbox id="start-in-tray" bind:checked={startInTray} />
             <Label for="start-in-tray" class="font-normal cursor-pointer">
               트레이 상태로 시작 (윈도우 숨김)
+            </Label>
+          </div>
+
+          <div class="flex items-center space-x-2 pt-3">
+            <Checkbox id="exit-with-game" bind:checked={exitWithGame} />
+            <Label for="exit-with-game" class="font-normal cursor-pointer">
+              게임 종료 시 트래커도 함께 종료
             </Label>
           </div>
 
